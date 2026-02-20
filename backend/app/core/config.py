@@ -1,5 +1,5 @@
-from typing import Literal
 from functools import lru_cache
+from typing import Literal, List
 from pydantic import computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -32,10 +32,16 @@ class Settings(BaseSettings):
     POSTGRES_DB: str = "mydatabase"
     POSTGRES_PORT: int = 5434
 
-    #Pg Admin
+    # Pg Admin
     PGADMIN_EMAIL: str | None = None
     PGADMIN_PASSWORD: str | None = None
     PGADMIN_PORT: int | None = None
+
+    # CORS
+    CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080"]
+    CORS_METHODS: List[str] = ["*"]
+    CORS_HEADERS: List[str] = ["*"]
+    CORS_ALLOW_CREDENTIALS: bool = True
 
     @computed_field
     @property

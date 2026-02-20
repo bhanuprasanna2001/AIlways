@@ -10,8 +10,7 @@ from alembic import context
 
 from app.core.config import get_settings
 
-# Add models here for 'autogenerate' support
-from app.db.models.user import User
+import app.db.models
 
 
 SETTINGS = get_settings()
