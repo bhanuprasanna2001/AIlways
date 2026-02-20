@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, cast
 
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
@@ -16,12 +16,10 @@ def adapt_message(error: Dict[str, str]) -> str:
     return msg
 
 
-async def validation_exception_handler(
-    _: Request, exc: RequestValidationError
-) -> JSONResponse:
+async def validation_exception_handler(_: Request, exc: Exception) -> JSONResponse:
+    validation_error = cast(RequestValidationError, exc)
     errors = []
-    for error in exc.errors():
+    for error in validation_error.errors():
         error.update({"msg": adapt_message(error)})
         errors.append(error)
     return JSONResponse({"detail": errors}, status_code=422)
-
