@@ -1,0 +1,41 @@
+services:
+  paradedb:
+    image: paradedb/paradedb:latest
+    container_name: ailways-paradedb
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-myuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mypassword}
+      POSTGRES_DB: ${POSTGRES_DB:-mydatabase}
+    ports:
+      - "${POSTGRES_PORT:-5434}:5432"
+    volumes:
+      - paradedb_data:/var/lib/postgresql/
+      - './app/db/db/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro'
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: ailways-pgadmin
+    depends_on:
+      paradedb:
+        condition: service_healthy
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin123}
+    ports:
+      - "127.0.0.1:${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+
+volumes:
+  paradedb_data:
+    driver: local
+  pgadmin_data:
+    driver: local
