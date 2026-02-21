@@ -1,19 +1,30 @@
-from contextlib import asynccontextmanager
 from typing import AsyncGenerator
+from contextlib import asynccontextmanager
+from tenacity import retry, stop_after_attempt, wait_fixed
 
 from fastapi import FastAPI
 
+from app.db import engine
 from app.core.config import get_settings
 from app.core.logger import setup_logger
-from app.db import engine
+
+from app.core.tools.redis import init_redis_client
 
 logger = setup_logger(__name__)
+
+
+@retry(stop=stop_after_attempt(5), wait=wait_fixed(2))
+async def check_redis_connection() -> None:
+    await init_redis_client()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     settings = get_settings()
     logger.info(f"Starting application in {settings.ENV}")
+
+    await check_redis_connection()
+    logger.info("Connected to Redis successfully")
 
     app.state.db_engine = engine
     logger.info("Database engine initialized")
