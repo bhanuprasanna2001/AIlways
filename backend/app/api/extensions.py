@@ -21,5 +21,7 @@ async def validation_exception_handler(_: Request, exc: Exception) -> JSONRespon
     errors = []
     for error in validation_error.errors():
         error.update({"msg": adapt_message(error)})
+        if "ctx" in error:
+            error["ctx"] = {k: str(v) for k, v in error["ctx"].items()}
         errors.append(error)
     return JSONResponse({"detail": errors}, status_code=422)

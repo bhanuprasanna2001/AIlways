@@ -43,29 +43,51 @@ class Settings(BaseSettings):
     CORS_HEADERS: List[str] = ["*"]
     CORS_ALLOW_CREDENTIALS: bool = True
 
+    # Redis
+    REDIS_PORT: int = 6380
+    REDIS_PASSWORD: str = "mypassword"
+    REDIS_SESSION_TTL_SECONDS: int = 60 * 60 * 24 * 7
+
+    # Cookies
+    SESSION_COOKIE_NAME: str = "session_id"
+    CSRF_COOKIE_NAME: str = "csrf_token"
+    
+
+    @computed_field
+    @property
+    def REDIS_URL(self) -> str:
+        host = "redis" if self.ENV == "production" else "localhost"
+        return f"redis://:{self.REDIS_PASSWORD}@{host}:{self.REDIS_PORT}"
+
     @computed_field
     @property
     def DATABASE_URL(self) -> str:
-        if self.ENV == "production":
-            return f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@db:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
-        else:
-            return f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@localhost:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+        host = "db" if self.ENV == "production" else "localhost"
+        return f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{host}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
 
     @computed_field
     @property
     def ASYNC_DATABASE_URL(self) -> str:
-        if self.ENV == "production":
-            return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@db:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
-        else:
-            return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@localhost:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+        host = "db" if self.ENV == "production" else "localhost"
+        return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{host}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+
+    @computed_field
+    @property
+    def COOKIE_SECURE(self) -> bool:
+        return self.ENV == "production"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @model_validator(mode="after")
-    def validate_urls(self) -> "Settings":
-        if not self.DATABASE_URL or "@db" in self.DATABASE_URL and self.ENV != "production":
-            raise ValueError("Invalid Database URL for current environment")
+    def validate_config(self) -> "Settings":
+        if self.ENV == "production":
+            assert "@db:" in self.DATABASE_URL, "Production DB URL must route to 'db' service"
+            assert "@redis:" in self.REDIS_URL, "Production Redis URL must route to 'redis' service"
+        else:
+            assert "@localhost:" in self.DATABASE_URL, "Dev DB URL must route to localhost"
+            assert "@localhost:" in self.REDIS_URL, "Dev Redis URL must route to localhost"
         return self
+
 
 @lru_cache()
 def get_settings() -> Settings:

@@ -8,3 +8,8 @@ SETTINGS = get_settings()
 DBSession = AsyncSession
 engine = create_async_engine(SETTINGS.ASYNC_DATABASE_URL,)
 async_session = async_sessionmaker(engine, class_=DBSession, expire_on_commit=False)
+
+async def get_db() -> AsyncSession:
+    async with async_session() as session:
+        yield session
+

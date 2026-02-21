@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 
 from app.api.routers import root
+from app.api.routers.auth.auth import router as auth_router
+
 from app.api.lifespan import lifespan
 from app.core.config import Settings, get_settings
 from app.api.extensions import validation_exception_handler
@@ -39,6 +41,7 @@ def register_middlewares(app: FastAPI) -> FastAPI:
 
 def register_routers(app: FastAPI) -> FastAPI:
     app.include_router(root.router)
+    app.include_router(auth_router)
     return app
 
 
