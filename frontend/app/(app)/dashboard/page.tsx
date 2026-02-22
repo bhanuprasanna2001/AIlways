@@ -10,7 +10,9 @@ export default async function DashboardPage() {
     <div className="min-h-screen bg-background">
       <header className="border-b border-neutral-200 dark:border-neutral-800">
         <div className="mx-auto flex h-16 max-w-5xl items-center justify-between px-6">
-          <h1 className="text-lg font-bold text-foreground">AIlways</h1>
+          <a href="/">
+            <h1 className="text-lg font-bold text-foreground">AIlways</h1>
+          </a>
           <div className="flex items-center gap-4">
             <span className="text-sm text-neutral-500 dark:text-neutral-400">
               {user.name}

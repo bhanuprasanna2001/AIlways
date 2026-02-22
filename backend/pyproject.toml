@@ -20,6 +20,7 @@ dependencies = [
     "pyrate-limiter==4.0.2",
     "fastapi-limiter==0.2.0",
     "greenlet==3.3.1",
+    "unstructured==0.20.8",
 ]
 
 [project.optional-dependencies]
