@@ -15,11 +15,27 @@ logger = setup_logger(__name__)
 
 @retry(stop=stop_after_attempt(5), wait=wait_fixed(2))
 async def check_redis_connection() -> None:
+    """Check the connection to Redis by initializing the client.
+    
+    Args:
+        None
+
+    Returns:
+        None
+    """
     await init_redis_client()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Lifespan context manager for the FastAPI application to handle startup and shutdown events.
+
+    Args:
+        app (FastAPI): The FastAPI application instance.
+
+    Returns:
+        AsyncGenerator[None, None]: An asynchronous generator for the lifespan context.
+    """
     settings = get_settings()
     logger.info(f"Starting application in {settings.ENV}")
 

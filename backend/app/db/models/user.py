@@ -4,7 +4,14 @@ from sqlmodel import Field, SQLModel
 
 
 def _utcnow_naive() -> datetime:
-    """Return current UTC time without tzinfo (matches TIMESTAMP WITHOUT TIME ZONE)."""
+    """Return current UTC time without tzinfo (matches TIMESTAMP WITHOUT TIME ZONE).
+
+    Args:
+        None
+
+    Returns:
+        datetime: Current UTC time without tzinfo.
+    """
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 

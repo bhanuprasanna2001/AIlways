@@ -5,6 +5,10 @@ import logging
 def setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     """Setup logger for the application.
 
+    Args:
+        name (str): The name of the logger.
+        level (int, optional): The logging level. Defaults to logging.INFO.
+
     Returns:
         logging.Logger: Configured logger instance.
     """

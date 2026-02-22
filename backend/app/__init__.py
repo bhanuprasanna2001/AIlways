@@ -8,6 +8,14 @@ SETTINGS = get_settings()
 app = create_app(SETTINGS)
 
 def start_server() -> None:
+    """Start the FastAPI server.
+
+    Args:
+        None
+
+    Returns:
+        None
+    """
     uvicorn.run(
         "app:app",
         host=SETTINGS.SERVER_HOST,
