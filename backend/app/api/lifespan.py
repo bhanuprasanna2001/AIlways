@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from app.db import engine
 from app.core.config import get_settings
 from app.core.logger import setup_logger
+from app.core.kafka.producer import KafkaProducer, KafkaProducerError
 
 from app.core.tools.redis import init_redis_client
 
@@ -45,9 +46,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.db_engine = engine
     logger.info("Database engine initialized")
 
+    # Kafka producer (optional — graceful degradation)
+    app.state.kafka_producer = None
+    if settings.KAFKA_ENABLED:
+        producer = KafkaProducer(settings.KAFKA_BOOTSTRAP_SERVERS)
+        try:
+            await producer.start()
+            app.state.kafka_producer = producer
+            logger.info("Kafka producer connected")
+        except KafkaProducerError as e:
+            logger.warning(f"Kafka unavailable — falling back to sync mode: {e}")
+
     try:
         yield
     finally:
+        if app.state.kafka_producer:
+            await app.state.kafka_producer.stop()
+            logger.info("Kafka producer stopped")
+
         if hasattr(app.state, "db_engine") and app.state.db_engine is not None:
             await app.state.db_engine.dispose()
             logger.info("Database engine disposed")

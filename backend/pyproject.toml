@@ -27,6 +27,7 @@ dependencies = [
     "aiofiles>=24.1.0",
     "cohere>=5.20.6",
     "numpy>=2.3.0",
+    "aiokafka>=0.13.0",
 ]
 
 [project.optional-dependencies]

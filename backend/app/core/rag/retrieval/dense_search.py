@@ -1,3 +1,4 @@
+import json
 from uuid import UUID
 
 from sqlalchemy import text
@@ -34,7 +35,7 @@ async def dense_search(
                1 - (c.embedding <=> :query_vec) AS score,
                c.section_heading, c.page_number,
                d.original_filename,
-               c.embedding::float[] AS embedding
+               c.embedding::text AS embedding_text
         FROM chunks c
         JOIN documents d ON c.doc_id = d.id
         WHERE c.vault_id = :vault_id
@@ -56,6 +57,12 @@ async def dense_search(
 
     rows = result.fetchall()
 
+    def _parse_vector_text(raw: str | None) -> list[float] | None:
+        """Parse pgvector text representation '[0.1,0.2,...]' to list[float]."""
+        if not raw:
+            return None
+        return json.loads(raw)
+
     return [
         SearchResult(
             chunk_id=row[0],
@@ -66,7 +73,7 @@ async def dense_search(
             section_heading=row[5],
             page_number=row[6],
             original_filename=row[7],
-            embedding=list(row[8]) if row[8] else None,
+            embedding=_parse_vector_text(row[8]),
         )
         for row in rows
     ]

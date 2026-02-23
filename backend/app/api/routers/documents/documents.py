@@ -3,17 +3,21 @@ from uuid import UUID
 from datetime import datetime, timezone
 
 from sqlmodel import select, func
+from sqlalchemy import delete as sqlalchemy_delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, status
+from fastapi.responses import JSONResponse
 
 from app.db import get_db
 from app.db.models import User, Document, Chunk
 from app.core.config import get_settings
 from app.core.auth.deps import get_current_user, require_csrf, require_vault_member
 from app.core.storage.local import LocalFileStore
+from app.core.kafka.producer import KafkaProducer, KafkaProducerError
+from app.core.kafka.topics import FILE_EVENTS, FileUploadedEvent, FileDeletedEvent, utcnow
 from app.core.logger import setup_logger
 
-from app.api.routers.documents.schemas import DocumentResponse, UploadResponse
+from app.api.routers.documents.schemas import DocumentResponse, UploadResponse, StatusResponse
 
 
 logger = setup_logger(__name__)
@@ -24,20 +28,44 @@ _file_store = LocalFileStore(SETTINGS.FILE_STORE_PATH)
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _get_producer(request: Request) -> KafkaProducer | None:
+    """Get the Kafka producer from app state, if available.
+
+    Args:
+        request: The incoming HTTP request.
+
+    Returns:
+        KafkaProducer or None if Kafka is disabled/unavailable.
+    """
+    producer = getattr(request.app.state, "kafka_producer", None)
+    if producer and producer.is_connected and SETTINGS.KAFKA_ENABLED:
+        return producer
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
-@router.post("/upload", dependencies=[Depends(require_csrf)], summary="Upload and ingest a document")
+@router.post("/upload", dependencies=[Depends(require_csrf)], summary="Upload a document")
 async def upload_document(
     vault_id: UUID,
+    request: Request,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Upload a file, parse, chunk, embed, and store it synchronously.
+    """Upload a file for ingestion.
+
+    When Kafka is available: saves file, produces event, returns 202 Accepted.
+    When Kafka is disabled: runs synchronous ingestion (Phase 1 fallback).
 
     Args:
         vault_id: The vault to upload into.
+        request: The HTTP request (for accessing app state).
         file: The uploaded file.
         current_user: The authenticated user.
         db: The database session.
@@ -80,6 +108,23 @@ async def upload_document(
     if existing.scalars().first():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This file already exists in the vault")
 
+    # Remove any soft-deleted record with the same hash to satisfy the DB unique constraint
+    stale = await db.execute(
+        select(Document).where(
+            Document.vault_id == vault_id,
+            Document.file_hash_sha256 == file_hash,
+            Document.deleted_at != None,
+        )
+    )
+    stale_doc = stale.scalars().first()
+    if stale_doc:
+        # Delete orphan chunks first (FK constraint prevents deleting the document otherwise)
+        await db.execute(
+            sqlalchemy_delete(Chunk).where(Chunk.doc_id == stale_doc.id)
+        )
+        await db.delete(stale_doc)
+        await db.flush()
+
     # Save raw file
     storage_path = f"{vault_id}/{file_hash}/{file.filename}"
     await _file_store.save(storage_path, content)
@@ -99,7 +144,33 @@ async def upload_document(
     await db.commit()
     await db.refresh(doc)
 
-    # Run synchronous ingestion pipeline (Phase 1 — blocking)
+    # --- Async path (Kafka available) ---
+    producer = _get_producer(request)
+    if producer:
+        event = FileUploadedEvent(
+            doc_id=doc.id,
+            vault_id=vault_id,
+            file_type=extension,
+            storage_path=storage_path,
+            original_filename=file.filename,
+            uploaded_by=current_user.id,
+            timestamp=utcnow(),
+        )
+        try:
+            await producer.send_event(FILE_EVENTS, event, key=str(vault_id))
+        except KafkaProducerError:
+            logger.warning(f"Kafka unavailable for doc {doc.id} — file saved, will retry via recovery")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="File saved successfully. Background processing temporarily unavailable.",
+            )
+
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=UploadResponse(id=doc.id, original_filename=doc.original_filename, status="pending", chunk_count=0).model_dump(mode="json"),
+        )
+
+    # --- Sync fallback (Kafka disabled) ---
     from app.core.rag.ingest import ingest_document
     from app.core.rag.parsing.registry import get_parser
     from app.core.rag.chunking.hierarchical import HierarchicalChunker
@@ -229,18 +300,61 @@ async def get_document(
     )
 
 
-@router.delete("/{doc_id}", dependencies=[Depends(require_csrf)], summary="Soft-delete a document")
-async def delete_document(
+@router.get("/{doc_id}/status", summary="Poll document ingestion status")
+async def get_document_status(
     vault_id: UUID,
     doc_id: UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Soft-delete a document and mark all its chunks as deleted.
+    """Poll the current ingestion status of a document.
 
     Args:
         vault_id: The vault identifier.
         doc_id: The document identifier.
+        current_user: The authenticated user.
+        db: The database session.
+
+    Returns:
+        StatusResponse: Current status and error info.
+    """
+    await require_vault_member(vault_id, current_user, db)
+
+    result = await db.execute(
+        select(Document).where(
+            Document.id == doc_id,
+            Document.vault_id == vault_id,
+        )
+    )
+    doc = result.scalars().first()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    return StatusResponse(
+        id=doc.id,
+        status=doc.status,
+        error_message=doc.error_message,
+        updated_at=doc.updated_at,
+    )
+
+
+@router.delete("/{doc_id}", dependencies=[Depends(require_csrf)], summary="Delete a document")
+async def delete_document(
+    vault_id: UUID,
+    doc_id: UUID,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a document and its chunks.
+
+    When Kafka is available: sets status to pending_delete, produces event.
+    When Kafka is disabled: performs synchronous soft-delete.
+
+    Args:
+        vault_id: The vault identifier.
+        doc_id: The document identifier.
+        request: The HTTP request.
         current_user: The authenticated user.
         db: The database session.
 
@@ -261,12 +375,30 @@ async def delete_document(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    # --- Async path (Kafka available) ---
+    producer = _get_producer(request)
+    if producer:
+        doc.status = "pending_delete"
+        doc.updated_at = now
+        db.add(doc)
+        await db.commit()
+
+        event = FileDeletedEvent(
+            doc_id=doc_id,
+            vault_id=vault_id,
+            deleted_by=current_user.id,
+            timestamp=utcnow(),
+        )
+        await producer.send_event(FILE_EVENTS, event, key=str(vault_id))
+        return {"message": "Document deletion queued"}
+
+    # --- Sync fallback ---
     doc.status = "deleted"
     doc.deleted_at = now
     doc.updated_at = now
     db.add(doc)
 
-    # Mark all chunks as deleted
     result = await db.execute(
         select(Chunk).where(Chunk.doc_id == doc_id, Chunk.is_deleted == False)
     )

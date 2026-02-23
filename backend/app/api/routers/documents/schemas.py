@@ -23,3 +23,10 @@ class UploadResponse(BaseModel):
     original_filename: str
     status: str
     chunk_count: int
+
+
+class StatusResponse(BaseModel):
+    id: UUID
+    status: str
+    error_message: str | None
+    updated_at: datetime

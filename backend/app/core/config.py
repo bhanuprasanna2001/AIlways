@@ -68,6 +68,14 @@ class Settings(BaseSettings):
     # Ingestion
     MAX_FILE_SIZE_MB: int = 50
     ALLOWED_FILE_TYPES: list[str] = ["pdf", "txt", "md"]
+
+    # Kafka / Redpanda
+    KAFKA_BOOTSTRAP_SERVERS: str = "localhost:19092"
+    KAFKA_CONSUMER_GROUP: str = "ailways-workers"
+    KAFKA_ENABLED: bool = True
+    KAFKA_PRODUCER_TIMEOUT_MS: int = 10000
+    KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS: int = 600000
+    KAFKA_RECOVERY_INTERVAL_MINUTES: int = 5
     
 
     @computed_field
