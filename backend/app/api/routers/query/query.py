@@ -1,3 +1,4 @@
+import time
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,7 +7,9 @@ from fastapi import APIRouter, Depends
 from app.db import get_db
 from app.db.models import User
 from app.core.auth.deps import get_current_user, require_vault_member
-from app.core.rag.query.pipeline import execute_query
+from app.core.rag.embedding import get_embedder
+from app.core.rag.retrieval import hybrid_search
+from app.core.rag.generation import generate_answer
 from app.core.logger import setup_logger
 
 from app.api.routers.query.schemas import QueryRequest, QueryResponse
@@ -25,8 +28,7 @@ async def query_vault(
 ):
     """Query documents in a vault and receive a grounded, cited answer.
 
-    Pipeline: classify → rewrite → expand → decompose → hybrid search
-    → RRF → rerank → MMR → parent expand → CRAG evaluate → reason.
+    Pipeline: embed → hybrid search (dense + BM25 + RRF + MMR) → generate.
 
     Args:
         vault_id: The vault to query.
@@ -39,24 +41,36 @@ async def query_vault(
     """
     await require_vault_member(vault_id, current_user, db)
 
-    result = await execute_query(
-        query=body.query,
+    start = time.monotonic()
+
+    # 1. Embed query
+    embedder = get_embedder()
+    query_embedding = await embedder.embed_query(body.query)
+
+    # 2. Hybrid search (dense + sparse + RRF + MMR)
+    results = await hybrid_search(
+        query_text=body.query,
+        query_embedding=query_embedding,
         vault_id=vault_id,
         db=db,
         top_k=body.top_k,
     )
 
+    # 3. Generate answer
+    if not results:
+        return QueryResponse(
+            answer="No relevant documents were found for your query.",
+            latency_ms=int((time.monotonic() - start) * 1000),
+        )
+
+    answer = await generate_answer(body.query, results)
+
     return QueryResponse(
-        answer=result.answer,
-        citations=result.citations,
-        confidence=result.confidence,
-        has_sufficient_evidence=result.has_sufficient_evidence,
-        chunks_used=result.chunks_used,
-        rewritten_query=result.rewritten_query,
-        retrieval_method=result.retrieval_method,
-        query_type=result.query_type,
-        quality_score=result.quality_score,
-        corrective_action_taken=result.corrective_action_taken,
-        queries_used=result.queries_used,
-        latency_ms=result.latency_ms,
+        answer=answer.answer,
+        citations=answer.citations,
+        confidence=answer.confidence,
+        has_sufficient_evidence=answer.has_sufficient_evidence,
+        chunks_used=len(results),
+        retrieval_method="hybrid",
+        latency_ms=int((time.monotonic() - start) * 1000),
     )

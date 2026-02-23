@@ -26,6 +26,53 @@ logger = setup_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Topic partition management
+# ---------------------------------------------------------------------------
+
+async def _ensure_topic_partitions(
+    bootstrap_servers: str,
+    min_partitions: int,
+) -> None:
+    """Ensure the file.events topic has enough partitions for concurrency.
+
+    Uses the Kafka admin API to check and increase partition count if needed.
+    Redpanda/Kafka auto-creates topics with 1 partition by default, which
+    limits consumer parallelism. This ensures we have at least ``min_partitions``.
+
+    Args:
+        bootstrap_servers: Kafka bootstrap server address.
+        min_partitions: Minimum number of partitions needed.
+    """
+    try:
+        from aiokafka.admin import AIOKafkaAdminClient, NewPartitions
+
+        admin = AIOKafkaAdminClient(bootstrap_servers=bootstrap_servers)
+        await admin.start()
+
+        try:
+            topic_metadata = await admin.describe_topics([FILE_EVENTS])
+            current_partitions = len(topic_metadata[0].get("partitions", []))
+
+            if current_partitions < min_partitions:
+                logger.info(
+                    f"Increasing {FILE_EVENTS} partitions: {current_partitions} → {min_partitions}"
+                )
+                await admin.create_partitions({
+                    FILE_EVENTS: NewPartitions(total_count=min_partitions)
+                })
+            else:
+                logger.info(
+                    f"{FILE_EVENTS} has {current_partitions} partitions (>= {min_partitions})"
+                )
+        finally:
+            await admin.close()
+    except ImportError:
+        logger.warning("aiokafka admin not available — skipping partition check")
+    except Exception as e:
+        logger.warning(f"Could not check/set partitions for {FILE_EVENTS}: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Recovery: find documents stuck in pending/ingesting
 # ---------------------------------------------------------------------------
 
@@ -100,13 +147,18 @@ def _build_workers(
     workers = []
 
     if worker_type in ("ingestion", "all"):
-        consumer = KafkaConsumer(
-            topics=[FILE_EVENTS],
-            group_id=f"{settings.KAFKA_CONSUMER_GROUP}-ingestion",
-            bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
-            max_poll_interval_ms=settings.KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS,
-        )
-        workers.append(IngestionWorker(consumer, producer, session_factory))
+        concurrency = settings.WORKER_INGESTION_CONCURRENCY
+        for i in range(concurrency):
+            consumer = KafkaConsumer(
+                topics=[FILE_EVENTS],
+                group_id=f"{settings.KAFKA_CONSUMER_GROUP}-ingestion",
+                bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
+                max_poll_interval_ms=settings.KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS,
+                max_batch_size=settings.WORKER_INGESTION_BATCH_SIZE,
+                batch_timeout_s=settings.WORKER_INGESTION_BATCH_TIMEOUT_S,
+            )
+            workers.append(IngestionWorker(consumer, producer, session_factory))
+        logger.info(f"Created {concurrency} ingestion worker instance(s)")
 
     if worker_type in ("deletion", "all"):
         consumer = KafkaConsumer(
@@ -148,6 +200,12 @@ async def run(worker_type: str) -> None:
     # Kafka producer (shared for DLQ + audit events)
     producer = KafkaProducer(settings.KAFKA_BOOTSTRAP_SERVERS, client_id="ailways-worker")
     await producer.start()
+
+    # Ensure topics have enough partitions for concurrent consumers
+    await _ensure_topic_partitions(
+        settings.KAFKA_BOOTSTRAP_SERVERS,
+        settings.WORKER_INGESTION_CONCURRENCY,
+    )
 
     # Recovery scan for stuck documents
     recovered = await recover_stuck_documents(

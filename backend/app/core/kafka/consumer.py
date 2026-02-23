@@ -1,4 +1,5 @@
 import json
+import asyncio
 from typing import Callable, Awaitable
 
 from aiokafka import AIOKafkaConsumer
@@ -12,9 +13,12 @@ logger = setup_logger(__name__)
 class KafkaConsumer:
     """Async Kafka consumer with manual offset commit and DLQ routing.
 
-    Deserializes JSON messages, calls the handler, and commits offsets
-    only after successful processing. Malformed or failed events are
-    routed to the DLQ so the consumer never blocks on a poison pill.
+    Supports two consumption modes:
+      - ``consume()``: per-message handler (original behaviour).
+      - ``consume_batches()``: batch handler — accumulates up to
+        ``max_batch_size`` messages (or waits ``batch_timeout_s``),
+        then calls the handler with the full list. Offsets are committed
+        once after the entire batch succeeds.
     """
 
     def __init__(
@@ -23,6 +27,8 @@ class KafkaConsumer:
         group_id: str,
         bootstrap_servers: str,
         max_poll_interval_ms: int = 600000,
+        max_batch_size: int = 20,
+        batch_timeout_s: float = 2.0,
     ) -> None:
         self._consumer = AIOKafkaConsumer(
             *topics,
@@ -34,6 +40,8 @@ class KafkaConsumer:
             max_poll_interval_ms=max_poll_interval_ms,
         )
         self._running = False
+        self._max_batch_size = max_batch_size
+        self._batch_timeout_s = batch_timeout_s
 
     async def start(self) -> None:
         """Start the consumer and subscribe to topics.
@@ -103,6 +111,76 @@ class KafkaConsumer:
         except Exception as e:
             if self._running:
                 logger.error(f"Consumer loop error: {e}")
+                raise
+
+    async def consume_batches(
+        self,
+        handler: Callable[[list[dict]], Awaitable[None]],
+        dlq: DLQHandler,
+        poll_timeout_ms: int = 200,
+    ) -> None:
+        """Batch consume loop — accumulates messages then calls handler with the full list.
+
+        Accumulates up to ``max_batch_size`` messages or waits up to
+        ``batch_timeout_s`` seconds (whichever comes first), then calls
+        the handler with all accumulated events. Offsets are committed
+        once after the batch handler returns.
+
+        If the batch handler fails, all events in the batch are routed
+        to the DLQ and offsets are still committed to avoid re-processing
+        the same poison-pill batch forever.
+
+        Args:
+            handler: Async callable that processes a list of event dicts.
+            dlq: Dead letter queue handler for failed batches.
+            poll_timeout_ms: Max milliseconds per poll iteration.
+        """
+        try:
+            while self._running:
+                batch: list[dict] = []
+                deadline = asyncio.get_event_loop().time() + self._batch_timeout_s
+
+                # Accumulate until batch is full or timeout expires
+                while len(batch) < self._max_batch_size and self._running:
+                    remaining_ms = max(
+                        int((deadline - asyncio.get_event_loop().time()) * 1000),
+                        0,
+                    )
+                    if remaining_ms <= 0:
+                        break
+
+                    timeout = min(poll_timeout_ms, remaining_ms)
+                    records = await self._consumer.getmany(
+                        timeout_ms=timeout,
+                        max_records=self._max_batch_size - len(batch),
+                    )
+                    for tp, messages in records.items():
+                        for msg in messages:
+                            if msg.value and isinstance(msg.value, dict):
+                                batch.append(msg.value)
+
+                if not batch:
+                    continue
+
+                logger.debug(f"Batch of {len(batch)} messages ready")
+
+                try:
+                    await handler(batch)
+                except Exception as e:
+                    logger.error(f"Batch handler failed for {len(batch)} events: {e}")
+                    for event in batch:
+                        await dlq.send(
+                            original_topic="file.events",
+                            original_event=event,
+                            error=e,
+                        )
+
+                # Commit after batch (success or DLQ)
+                await self._consumer.commit()
+
+        except Exception as e:
+            if self._running:
+                logger.error(f"Batch consumer loop error: {e}")
                 raise
 
     def request_shutdown(self) -> None:

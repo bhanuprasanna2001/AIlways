@@ -1,6 +1,6 @@
 from pydantic import BaseModel, field_validator
 
-from app.core.rag.reasoning.schemas import Citation
+from app.core.rag.generation import Citation
 
 
 # ---------------------------------------------------------------------------
@@ -35,11 +35,5 @@ class QueryResponse(BaseModel):
     confidence: float = 0.0
     has_sufficient_evidence: bool = False
     chunks_used: int = 0
-    rewritten_query: str | None = None
     retrieval_method: str = "hybrid"
-    # Phase 4 — query intelligence
-    query_type: str = ""
-    quality_score: float = 0.0
-    corrective_action_taken: str | None = None
-    queries_used: list[str] = []
     latency_ms: int = 0

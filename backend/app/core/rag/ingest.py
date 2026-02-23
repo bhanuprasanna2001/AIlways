@@ -1,20 +1,71 @@
+"""Ingestion orchestrator.
+
+Coordinates the full ingestion pipeline for a single document:
+
+    parse → chunk → embed → store
+
+Designed for both Kafka-driven (async worker) and sync-fallback
+(direct API call) paths. The caller provides the database session
+and embedder so that resources can be shared across invocations.
+
+Supports two modes:
+  - **Single-doc:** ``ingest_document()`` — parse, chunk, embed, store
+    in one call. Used by the sync-fallback path.
+  - **Batch-optimised:** ``prepare_document()`` + ``batch_embed_and_store()``
+    — parse+chunk up-front for N documents, then embed ALL chunks across
+    all documents in a single OpenAI API call and bulk-insert. Used by
+    the batching ingestion worker for ~5-10× throughput.
+
+Key design decisions:
+  - Parsing runs in a thread pool (CPU-bound pdfplumber).
+  - All chunks for a document are bulk-inserted in one flush.
+  - Embeddings use the shared embedder instance (connection reuse).
+  - On failure, the document is marked 'failed' and the error is recorded.
+  - A pre-flight deletion check prevents wasted work if the document
+    was deleted while queued.
+"""
+
+from __future__ import annotations
+
 from uuid import UUID
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from sqlmodel import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Document, Chunk
-from app.core.storage.base import FileStore
-from app.core.rag.parsing.base import Parser
-from app.core.rag.chunking.base import Chunker
+from app.core.rag.parsing import get_parser
+from app.core.rag.chunking import get_chunker
+from app.core.rag.chunking.base import ChunkData
 from app.core.rag.embedding.base import Embedder
-from app.core.rag.embedding.batch import batch_embed
 from app.core.rag.exceptions import IngestionError
 from app.core.logger import setup_logger
 
 logger = setup_logger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Data structures for batch processing
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PreparedDoc:
+    """A document that has been parsed and chunked, ready for embedding.
+
+    Attributes:
+        doc_id: Database document UUID.
+        vault_id: Owning vault UUID.
+        chunks: List of ChunkData from the chunker.
+    """
+    doc_id: UUID
+    vault_id: UUID
+    chunks: list[ChunkData] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 async def ingest_document(
     doc_id: UUID,
@@ -23,192 +74,282 @@ async def ingest_document(
     file_type: str,
     vault_id: UUID,
     db: AsyncSession,
-    file_store: FileStore,
-    parser: Parser,
-    chunker: Chunker,
     embedder: Embedder,
 ) -> int:
-    """Orchestrate the full ingestion pipeline: parse → chunk → embed → store.
+    """Run the full ingestion pipeline for one document.
 
     Args:
-        doc_id: The document ID (already created in the DB).
+        doc_id: Document UUID (must already exist in DB with status 'pending').
         file_content: Raw file bytes.
         filename: Original filename.
-        file_type: Lowercase file extension.
-        vault_id: The vault this document belongs to.
-        db: The database session.
-        file_store: File storage backend.
-        parser: Document parser.
-        chunker: Document chunker.
-        embedder: Embedding service.
+        file_type: Lowercase file extension ('pdf', 'txt', 'md').
+        vault_id: Vault that owns this document.
+        db: Async database session (caller manages the transaction boundary
+            for the sync-fallback path; the worker path commits here).
+        embedder: Shared embedder instance (satisfies Embedder protocol).
 
     Returns:
         int: Number of chunks created.
 
     Raises:
-        IngestionError: If any step in the pipeline fails.
+        IngestionError: If any stage fails. The document status is set to
+            'failed' with the error message before re-raising.
     """
     try:
-        # 1. Mark as ingesting
+        # Mark document as ingesting
         await _set_status(db, doc_id, "ingesting")
 
-        # 2. Parse
-        logger.info(f"Parsing document {doc_id} ({filename})")
-        parsed = await parser.parse(file_content, filename)
+        # 1. Parse
+        parser = get_parser(file_type)
+        markdown = await parser.parse(file_content, filename)
 
-        # 3. Save parsed IR to file store
-        ir_path = f"{vault_id}/{doc_id}/parsed.json"
-        await file_store.save(ir_path, parsed.model_dump_json().encode("utf-8"))
+        # 2. Chunk
+        chunker = get_chunker()
+        chunk_data = chunker.chunk(markdown, filename)
 
-        # 4. Update document metadata
-        doc = await _get_doc(db, doc_id)
-        doc.parsed_ir_path = ir_path
-        doc.page_count = parsed.metadata.page_count
-        doc.updated_at = _now()
-        db.add(doc)
-        await db.flush()
-
-        # 5. Chunk
-        logger.info(f"Chunking document {doc_id}")
-        chunk_data_list = chunker.chunk(parsed)
-
-        if not chunk_data_list:
+        if not chunk_data:
             await _set_status(db, doc_id, "failed", error_message="No text content could be extracted")
             raise IngestionError("No text content could be extracted")
 
-        # 6. Embed (only child chunks — parents are not embedded)
-        logger.info(f"Embedding chunks for document {doc_id}")
-        child_indices = [
-            i for i, c in enumerate(chunk_data_list) if c.chunk_type == "child"
-        ]
-        child_texts = [chunk_data_list[i].content_with_header for i in child_indices]
-        child_hashes = [chunk_data_list[i].content_hash for i in child_indices]
+        # 3. Pre-flight check — abort if document was deleted while queued
+        doc = await _get_doc(db, doc_id)
+        if doc.deleted_at is not None or doc.status in ("pending_delete", "deleted"):
+            logger.info(f"Document {doc_id} was deleted during ingestion — aborting")
+            return 0
 
-        existing_hashes = await _get_existing_hashes(db, doc_id)
-        child_embeddings = await batch_embed(child_texts, child_hashes, embedder, existing_hashes)
+        # 4. Embed — batch all chunks in one API call
+        texts = [cd.content_with_header for cd in chunk_data]
+        embeddings = await embedder.embed_documents(texts)
 
-        # Build index → embedding map for children
-        embedding_map: dict[int, list[float] | None] = {}
-        for pos, chunk_idx in enumerate(child_indices):
-            embedding_map[chunk_idx] = child_embeddings[pos]
-
-        logger.info(
-            f"Embedded {len(child_indices)} child chunks "
-            f"({len(chunk_data_list) - len(child_indices)} parents skipped)"
-        )
-
-        # 7. Upsert chunks — parents first, then children with parent_chunk_id
-        logger.info(f"Storing {len(chunk_data_list)} chunks for document {doc_id}")
-
-        # Map chunk_index → DB UUID (for resolving parent references)
-        index_to_uuid: dict[int, "UUID"] = {}
-
-        for i, cd in enumerate(chunk_data_list):
-            embedding = embedding_map.get(i)
-
-            # Check if chunk already exists (re-ingestion)
-            result = await db.execute(
-                select(Chunk).where(
-                    Chunk.doc_id == doc_id,
-                    Chunk.chunk_index == cd.chunk_index,
-                    Chunk.chunk_version == 1,
-                )
+        # 5. Bulk insert chunks
+        chunk_records = [
+            Chunk(
+                doc_id=doc_id,
+                vault_id=vault_id,
+                content=cd.content,
+                content_with_header=cd.content_with_header,
+                content_hash=cd.content_hash,
+                token_count=cd.token_count,
+                chunk_index=cd.chunk_index,
+                chunk_type="child",
+                embedding=emb,
+                chunk_version=1,
             )
-            existing_chunk = result.scalars().first()
+            for cd, emb in zip(chunk_data, embeddings)
+        ]
+        db.add_all(chunk_records)
+        await db.flush()
 
-            # Resolve parent reference
-            parent_chunk_id = None
-            if cd.parent_index is not None:
-                parent_chunk_id = index_to_uuid.get(cd.parent_index)
+        # 6. Update document metadata
+        doc = await _get_doc(db, doc_id)
+        doc.status = "active"
+        doc.error_message = None
+        doc.updated_at = _now()
+        db.add(doc)
 
-            if existing_chunk:
-                if existing_chunk.content_hash != cd.content_hash:
-                    existing_chunk.content = cd.content
-                    existing_chunk.content_with_header = cd.content_with_header
-                    existing_chunk.content_hash = cd.content_hash
-                    existing_chunk.token_count = cd.token_count
-                    existing_chunk.chunk_type = cd.chunk_type
-                    existing_chunk.parent_chunk_id = parent_chunk_id
-                    existing_chunk.section_heading = cd.section_heading
-                    existing_chunk.section_level = cd.section_level
-                    existing_chunk.page_number = cd.page_number
-                    existing_chunk.char_start = cd.char_start
-                    existing_chunk.char_end = cd.char_end
-                    if embedding is not None:
-                        existing_chunk.embedding = embedding
-                    db.add(existing_chunk)
-                index_to_uuid[cd.chunk_index] = existing_chunk.id
-            else:
-                chunk = Chunk(
-                    doc_id=doc_id,
-                    vault_id=vault_id,
-                    content=cd.content,
-                    content_with_header=cd.content_with_header,
-                    content_hash=cd.content_hash,
-                    token_count=cd.token_count,
-                    chunk_index=cd.chunk_index,
-                    chunk_type=cd.chunk_type,
-                    parent_chunk_id=parent_chunk_id,
-                    section_heading=cd.section_heading,
-                    section_level=cd.section_level,
-                    page_number=cd.page_number,
-                    char_start=cd.char_start,
-                    char_end=cd.char_end,
-                    embedding=embedding,
-                    chunk_version=1,
-                )
-                db.add(chunk)
-                await db.flush()
-                index_to_uuid[cd.chunk_index] = chunk.id
-
-        # 8. Mark as active
-        await _set_status(db, doc_id, "active")
         await db.commit()
 
-        logger.info(f"Ingestion complete for {doc_id}: {len(chunk_data_list)} chunks")
-        return len(chunk_data_list)
+        logger.info(f"Ingestion complete for {doc_id}: {len(chunk_records)} chunks")
+        return len(chunk_records)
 
     except IngestionError:
         raise
     except Exception as e:
         logger.error(f"Ingestion failed for {doc_id}: {e}")
         await db.rollback()
-        await _set_status(db, doc_id, "failed", error_message=str(e))
+        await _set_status(db, doc_id, "failed", error_message=str(e)[:500])
         await db.commit()
         raise IngestionError(f"Ingestion failed: {e}") from e
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Batch-optimised API (for worker)
+# ---------------------------------------------------------------------------
+
+async def prepare_document(
+    doc_id: UUID,
+    file_content: bytes,
+    filename: str,
+    file_type: str,
+    vault_id: UUID,
+    db: AsyncSession,
+) -> PreparedDoc | None:
+    """Parse and chunk a document without embedding.
+
+    This is the first stage of the two-phase batch pipeline. Multiple
+    documents can be prepared independently, then all their chunks are
+    embedded together in a single ``batch_embed_and_store()`` call.
+
+    Args:
+        doc_id: Document UUID.
+        file_content: Raw file bytes.
+        filename: Original filename.
+        file_type: File extension.
+        vault_id: Owning vault UUID.
+        db: Async database session.
+
+    Returns:
+        PreparedDoc with parsed chunks, or None if skipped (deleted, empty).
+    """
+    try:
+        await _set_status(db, doc_id, "ingesting")
+
+        # Parse
+        parser = get_parser(file_type)
+        markdown = await parser.parse(file_content, filename)
+
+        # Chunk
+        chunker = get_chunker()
+        chunk_data = chunker.chunk(markdown, filename)
+
+        if not chunk_data:
+            await _set_status(db, doc_id, "failed", error_message="No text content could be extracted")
+            return None
+
+        # Pre-flight deletion check
+        doc = await _get_doc(db, doc_id)
+        if doc.deleted_at is not None or doc.status in ("pending_delete", "deleted"):
+            logger.info(f"Document {doc_id} was deleted during ingestion — aborting")
+            return None
+
+        return PreparedDoc(doc_id=doc_id, vault_id=vault_id, chunks=chunk_data)
+
+    except Exception as e:
+        logger.error(f"Prepare failed for {doc_id}: {e}")
+        try:
+            await db.rollback()
+            await _set_status(db, doc_id, "failed", error_message=str(e)[:500])
+            await db.commit()
+        except Exception:
+            pass
+        return None
+
+
+async def batch_embed_and_store(
+    prepared: list[PreparedDoc],
+    db: AsyncSession,
+    embedder: Embedder,
+) -> dict[UUID, int]:
+    """Embed and store chunks for multiple documents in one API call.
+
+    Collects all chunk texts across all prepared documents, calls the
+    embedder once, then bulk-inserts all Chunk records and marks each
+    document as active.
+
+    Args:
+        prepared: List of PreparedDoc from ``prepare_document()``.
+        db: Async database session.
+        embedder: Shared embedder instance.
+
+    Returns:
+        dict mapping doc_id → chunk count for successfully stored documents.
+    """
+    if not prepared:
+        return {}
+
+    # Flatten all texts and track ownership
+    all_texts: list[str] = []
+    doc_offsets: list[tuple[PreparedDoc, int, int]] = []  # (prepared, start, end)
+
+    for pdoc in prepared:
+        start = len(all_texts)
+        all_texts.extend(cd.content_with_header for cd in pdoc.chunks)
+        end = len(all_texts)
+        doc_offsets.append((pdoc, start, end))
+
+    total_chunks = len(all_texts)
+    logger.info(f"Batch embedding {total_chunks} chunks across {len(prepared)} documents")
+
+    # Single embedding API call for ALL chunks
+    try:
+        all_embeddings = await embedder.embed_documents(all_texts)
+    except Exception as e:
+        logger.error(f"Batch embedding failed: {e}")
+        # Mark all docs as failed
+        for pdoc in prepared:
+            try:
+                await _set_status(db, pdoc.doc_id, "failed", error_message=f"Embedding failed: {e}"[:500])
+            except Exception:
+                pass
+        await db.commit()
+        return {}
+
+    # Build and store chunks per document (using savepoints for isolation)
+    results: dict[UUID, int] = {}
+    for pdoc, start, end in doc_offsets:
+        try:
+            async with db.begin_nested():
+                doc_embeddings = all_embeddings[start:end]
+                chunk_records = [
+                    Chunk(
+                        doc_id=pdoc.doc_id,
+                        vault_id=pdoc.vault_id,
+                        content=cd.content,
+                        content_with_header=cd.content_with_header,
+                        content_hash=cd.content_hash,
+                        token_count=cd.token_count,
+                        chunk_index=cd.chunk_index,
+                        chunk_type="child",
+                        embedding=emb,
+                        chunk_version=1,
+                    )
+                    for cd, emb in zip(pdoc.chunks, doc_embeddings)
+                ]
+                db.add_all(chunk_records)
+                await db.flush()
+
+                doc = await _get_doc(db, pdoc.doc_id)
+                doc.status = "active"
+                doc.error_message = None
+                doc.updated_at = _now()
+                db.add(doc)
+
+            results[pdoc.doc_id] = len(chunk_records)
+
+        except Exception as e:
+            logger.error(f"Store failed for {pdoc.doc_id}: {e}")
+            # Savepoint rollback is automatic — only this doc's changes are undone
+            try:
+                await _set_status(db, pdoc.doc_id, "failed", error_message=str(e)[:500])
+            except Exception:
+                pass
+
+    await db.commit()
+    logger.info(f"Batch complete: {len(results)}/{len(prepared)} documents stored, {total_chunks} chunks")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
 # ---------------------------------------------------------------------------
 
 def _now() -> datetime:
-    """Return current UTC time without tzinfo."""
+    """UTC now without timezone info (matches DB column type)."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 async def _get_doc(db: AsyncSession, doc_id: UUID) -> Document:
-    """Fetch a document by ID.
-
-    Args:
-        db: The database session.
-        doc_id: The document ID.
-
-    Returns:
-        Document: The document instance.
-    """
+    """Fetch a Document by ID. Raises if not found."""
     result = await db.execute(select(Document).where(Document.id == doc_id))
-    return result.scalars().one()
+    doc = result.scalars().one_or_none()
+    if doc is None:
+        raise IngestionError(f"Document {doc_id} not found in database")
+    return doc
 
 
-async def _set_status(db: AsyncSession, doc_id: UUID, status: str, error_message: str | None = None) -> None:
-    """Update the document status.
+async def _set_status(
+    db: AsyncSession,
+    doc_id: UUID,
+    status: str,
+    error_message: str | None = None,
+) -> None:
+    """Update the status of a document.
 
     Args:
-        db: The database session.
-        doc_id: The document ID.
-        status: The new status value.
-        error_message: Optional error message (for 'failed' status).
+        db: Database session.
+        doc_id: Document UUID.
+        status: New status string.
+        error_message: Optional error message.
     """
     doc = await _get_doc(db, doc_id)
     doc.status = status
@@ -216,23 +357,3 @@ async def _set_status(db: AsyncSession, doc_id: UUID, status: str, error_message
     doc.updated_at = _now()
     db.add(doc)
     await db.flush()
-
-
-async def _get_existing_hashes(db: AsyncSession, doc_id: UUID) -> set[str]:
-    """Get content hashes for existing chunks of a document.
-
-    Args:
-        db: The database session.
-        doc_id: The document ID.
-
-    Returns:
-        set[str]: Set of content hashes that already have embeddings.
-    """
-    result = await db.execute(
-        select(Chunk.content_hash).where(
-            Chunk.doc_id == doc_id,
-            Chunk.embedding != None,
-            Chunk.is_deleted == False,
-        )
-    )
-    return set(result.scalars().all())

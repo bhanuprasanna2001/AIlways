@@ -69,6 +69,13 @@ class Settings(BaseSettings):
     MAX_FILE_SIZE_MB: int = 50
     ALLOWED_FILE_TYPES: list[str] = ["pdf", "txt", "md"]
 
+    # RAG Pipeline
+    RAG_CHUNK_SIZE: int = 512
+    RAG_CHUNK_OVERLAP: int = 50
+    RAG_EMBEDDING_BATCH_SIZE: int = 2048
+    RAG_SEARCH_TOP_K: int = 5
+    RAG_GENERATION_TEMPERATURE: float = 0.1
+
     # Kafka / Redpanda
     KAFKA_BOOTSTRAP_SERVERS: str = "localhost:19092"
     KAFKA_CONSUMER_GROUP: str = "ailways-workers"
@@ -76,6 +83,11 @@ class Settings(BaseSettings):
     KAFKA_PRODUCER_TIMEOUT_MS: int = 10000
     KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS: int = 600000
     KAFKA_RECOVERY_INTERVAL_MINUTES: int = 5
+
+    # Worker tuning
+    WORKER_INGESTION_BATCH_SIZE: int = 20
+    WORKER_INGESTION_BATCH_TIMEOUT_S: float = 2.0
+    WORKER_INGESTION_CONCURRENCY: int = 5
     
 
     @computed_field

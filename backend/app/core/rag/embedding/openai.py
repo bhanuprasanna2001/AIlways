@@ -1,59 +1,62 @@
-from openai import AsyncOpenAI
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+"""OpenAI embedder — wraps langchain-openai OpenAIEmbeddings."""
+
+from __future__ import annotations
+
+from langchain_openai import OpenAIEmbeddings
 
 from app.core.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-# Retry on rate limits and transient errors
-_RETRY_EXCEPTIONS = (Exception,)
-
 
 class OpenAIEmbedder:
-    """OpenAI text-embedding-3-large embedder with Matryoshka dimension reduction.
+    """Embedder backed by OpenAI text-embedding models.
 
-    Uses the OpenAI API to generate embeddings. Supports dimension reduction
-    via the `dimensions` parameter (Matryoshka Representation Learning).
+    Wraps ``langchain_openai.OpenAIEmbeddings`` to provide a clean,
+    provider-agnostic interface that satisfies the ``Embedder`` protocol.
+
+    Connection pooling, retries, and batch splitting are handled by the
+    underlying langchain client.
+
+    Args:
+        model: OpenAI embedding model name.
+        dimensions: Output embedding dimensionality.
+        api_key: OpenAI API key.
+        batch_size: Maximum texts per API call (default 2048).
     """
 
-    def __init__(self, api_key: str, model: str = "text-embedding-3-large", dims: int = 1536) -> None:
-        if not api_key:
-            raise ValueError("OpenAI API key is required")
-        self._client = AsyncOpenAI(api_key=api_key)
-        self._model = model
-        self._dims = dims
-
-    def dimensions(self) -> int:
-        """Return the configured embedding dimensions.
-
-        Returns:
-            int: Number of dimensions.
-        """
-        return self._dims
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
-        reraise=True,
-    )
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Embed a list of texts using the OpenAI API.
-
-        Args:
-            texts: List of texts to embed.
-
-        Returns:
-            list[list[float]]: Embedding vectors in the same order as input.
-        """
-        if not texts:
-            return []
-
-        response = await self._client.embeddings.create(
-            input=texts,
-            model=self._model,
-            dimensions=self._dims,
+    def __init__(
+        self,
+        model: str,
+        dimensions: int,
+        api_key: str,
+        batch_size: int = 2048,
+    ) -> None:
+        self._client = OpenAIEmbeddings(
+            model=model,
+            dimensions=dimensions,
+            api_key=api_key,
+            chunk_size=batch_size,
         )
 
-        # Sort by index to guarantee order matches input
-        sorted_data = sorted(response.data, key=lambda x: x.index)
-        return [item.embedding for item in sorted_data]
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch of texts.
+
+        Args:
+            texts: List of text strings to embed.
+
+        Returns:
+            list[list[float]]: Embedding vectors, one per input text.
+        """
+        return await self._client.aembed_documents(texts)
+
+    async def embed_query(self, text: str) -> list[float]:
+        """Embed a single query string.
+
+        Args:
+            text: Query text to embed.
+
+        Returns:
+            list[float]: Embedding vector.
+        """
+        return await self._client.aembed_query(text)

@@ -172,19 +172,9 @@ async def upload_document(
 
     # --- Sync fallback (Kafka disabled) ---
     from app.core.rag.ingest import ingest_document
-    from app.core.rag.parsing.registry import get_parser
-    from app.core.rag.chunking.hierarchical import HierarchicalChunker
-    from app.core.rag.embedding.openai import OpenAIEmbedder
+    from app.core.rag.embedding import get_embedder
 
     try:
-        parser = get_parser(extension)
-        chunker = HierarchicalChunker()
-        embedder = OpenAIEmbedder(
-            api_key=SETTINGS.OPENAI_API_KEY,
-            model=SETTINGS.OPENAI_EMBEDDING_MODEL,
-            dims=SETTINGS.OPENAI_EMBEDDING_DIMENSIONS,
-        )
-
         chunk_count = await ingest_document(
             doc_id=doc.id,
             file_content=content,
@@ -192,10 +182,7 @@ async def upload_document(
             file_type=extension,
             vault_id=vault_id,
             db=db,
-            file_store=_file_store,
-            parser=parser,
-            chunker=chunker,
-            embedder=embedder,
+            embedder=get_embedder(),
         )
     except Exception as e:
         logger.error(f"Ingestion failed for {doc.id}: {e}")
@@ -408,3 +395,65 @@ async def delete_document(
 
     await db.commit()
     return {"message": "Document deleted"}
+
+
+@router.post("/parse", dependencies=[Depends(require_csrf)], summary="Parse a document (preview)")
+async def parse_document(
+    vault_id: UUID,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Parse a file and return the extracted markdown without storing anything.
+
+    Useful for previewing parser output before uploading. No database
+    records or storage side-effects are created.
+
+    Args:
+        vault_id: The vault context (used for auth check only).
+        file: The file to parse.
+        current_user: The authenticated user.
+        db: The database session.
+
+    Returns:
+        dict: Parsed markdown text, character count, and filename.
+    """
+    await require_vault_member(vault_id, current_user, db)
+
+    if not file.filename:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Filename is required",
+        )
+
+    extension = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if extension not in {"pdf", "txt", "md"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unsupported file type: {extension}. Supported: pdf, txt, md",
+        )
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="File is empty",
+        )
+
+    from app.core.rag.parsing import get_parser
+
+    try:
+        parser = get_parser(extension)
+        markdown = await parser.parse(content, file.filename)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e),
+        )
+
+    return {
+        "filename": file.filename,
+        "file_type": extension,
+        "markdown": markdown,
+        "char_count": len(markdown),
+    }

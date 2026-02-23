@@ -1,22 +1,31 @@
-from typing import Protocol
+"""Parser protocol — defines the interface for document parsers."""
 
-from app.core.rag.parsing.ir import ParsedDocument
+from __future__ import annotations
+
+from typing import Protocol, runtime_checkable
 
 
+@runtime_checkable
 class Parser(Protocol):
     """Protocol for document parsers.
 
-    Each parser converts raw file bytes into a ParsedDocument IR.
+    Any class that implements ``parse`` with the correct signature
+    satisfies this protocol — no inheritance needed.
+
+    To add a new parser (e.g. DOCX):
+        1. Create ``app/core/rag/parsing/docx.py`` with a ``DocxParser`` class
+           that has an ``async def parse(self, ...) -> str`` method.
+        2. Register it in ``parsing/__init__.py``'s ``_PARSERS`` dict.
     """
 
-    async def parse(self, file_content: bytes, filename: str) -> ParsedDocument:
-        """Parse raw file content into a structured intermediate representation.
+    async def parse(self, file_content: bytes, filename: str) -> str:
+        """Parse raw file content into markdown text.
 
         Args:
-            file_content: Raw bytes of the file.
-            filename: Original filename (used for metadata and format hints).
+            file_content: Raw bytes of the uploaded file.
+            filename: Original filename (for logging / metadata).
 
         Returns:
-            ParsedDocument: The parsed intermediate representation.
+            str: Parsed text in markdown format.
         """
         ...
