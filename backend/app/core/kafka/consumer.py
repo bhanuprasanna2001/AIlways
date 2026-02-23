@@ -55,6 +55,7 @@ class KafkaConsumer:
         self,
         handler: Callable[[dict], Awaitable[None]],
         dlq: DLQHandler,
+        poll_timeout_ms: int = 500,
     ) -> None:
         """Main consume loop.
 
@@ -65,30 +66,40 @@ class KafkaConsumer:
         4. On handler failure: route to DLQ, commit offset, continue.
         5. On deserialization failure: route to DLQ, commit offset, continue.
 
+        Uses getmany() with a short timeout so the shutdown flag is checked
+        even when no messages are arriving, making Ctrl-C / SIGTERM respond
+        immediately instead of hanging until the next message.
+
         Args:
             handler: Async callable that processes a single event dict.
             dlq: Dead letter queue handler for failed events.
+            poll_timeout_ms: Max milliseconds to wait for messages per poll.
         """
         try:
-            async for msg in self._consumer:
-                if not self._running:
-                    break
+            while self._running:
+                records = await self._consumer.getmany(
+                    timeout_ms=poll_timeout_ms, max_records=10
+                )
+                for tp, messages in records.items():
+                    for msg in messages:
+                        if not self._running:
+                            break
 
-                event = msg.value
-                topic = msg.topic
+                        event = msg.value
+                        topic = msg.topic
 
-                try:
-                    await handler(event)
-                except Exception as e:
-                    logger.error(f"Handler failed for event on {topic}: {e}")
-                    await dlq.send(
-                        original_topic=topic,
-                        original_event=event if isinstance(event, dict) else {"raw": str(event)},
-                        error=e,
-                    )
+                        try:
+                            await handler(event)
+                        except Exception as e:
+                            logger.error(f"Handler failed for event on {topic}: {e}")
+                            await dlq.send(
+                                original_topic=topic,
+                                original_event=event if isinstance(event, dict) else {"raw": str(event)},
+                                error=e,
+                            )
 
-                # Commit after processing (success or DLQ routing)
-                await self._consumer.commit()
+                        # Commit after processing (success or DLQ routing)
+                        await self._consumer.commit()
         except Exception as e:
             if self._running:
                 logger.error(f"Consumer loop error: {e}")

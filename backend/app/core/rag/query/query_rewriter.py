@@ -7,10 +7,13 @@ logger = setup_logger(__name__)
 
 _MAX_QUERY_LENGTH = 2000
 
-_REWRITE_PROMPT = """Rewrite this question to be specific and search-friendly.
-Preserve any mentions of document numbers, names, dates, or amounts.
-Do not add information not present in the original question.
-If the question is already specific, return it unchanged.
+_REWRITE_PROMPT = """Rewrite this question to be clearer and more search-friendly.
+Rules:
+- NEVER invent document numbers, names, dates, amounts, or any facts not in the original.
+- Preserve all specific details from the original exactly.
+- If the question is vague, make it broader (e.g. "Tell me about X" → "What types of X exist, and what are their key details?").
+- If the question is already specific, return it unchanged.
+- Output ONLY the rewritten question, nothing else.
 
 Original: {query}
 Rewritten:"""

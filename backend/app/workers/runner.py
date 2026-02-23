@@ -168,14 +168,26 @@ async def run(worker_type: str) -> None:
 
     # Graceful shutdown on signals
     loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
+
+    def _handle_signal() -> None:
+        logger.info("Shutdown signal received")
+        for w in workers:
+            w.shutdown()
+        shutdown_event.set()
+
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda: [w.shutdown() for w in workers])
+        loop.add_signal_handler(sig, _handle_signal)
 
     # Run all workers concurrently
     logger.info(f"Running worker(s): {worker_type}")
     try:
         await asyncio.gather(*(w.run() for w in workers))
+    except asyncio.CancelledError:
+        pass
     finally:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.remove_signal_handler(sig)
         for w in workers:
             await w._consumer.stop()
         await producer.stop()

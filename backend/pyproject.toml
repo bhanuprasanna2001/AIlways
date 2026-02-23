@@ -28,6 +28,7 @@ dependencies = [
     "cohere>=5.20.6",
     "numpy>=2.3.0",
     "aiokafka>=0.13.0",
+    "langchain-core>=1.2.14",
 ]
 
 [project.optional-dependencies]

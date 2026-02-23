@@ -37,3 +37,9 @@ class QueryResponse(BaseModel):
     chunks_used: int = 0
     rewritten_query: str | None = None
     retrieval_method: str = "hybrid"
+    # Phase 4 — query intelligence
+    query_type: str = ""
+    quality_score: float = 0.0
+    corrective_action_taken: str | None = None
+    queries_used: list[str] = []
+    latency_ms: int = 0

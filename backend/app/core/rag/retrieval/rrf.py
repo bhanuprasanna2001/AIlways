@@ -36,6 +36,17 @@ def reciprocal_rank_fusion(
             if cid not in best or result.score > best[cid].score:
                 best[cid] = result
 
+            # Preserve embedding across copies — dense search provides it,
+            # sparse search does not. Without this, the embedding gets
+            # lost when the sparse copy wins on score, breaking downstream
+            # MMR diversity computation.
+            if result.embedding is not None and (
+                cid not in best or best[cid].embedding is None
+            ):
+                best[cid] = best[cid].model_copy(
+                    update={"embedding": result.embedding}
+                )
+
     # Build output with fused scores
     fused = []
     for cid, fused_score in scores.items():

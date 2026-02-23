@@ -3,6 +3,7 @@
 
 
 ### My ###
+backend/data/*
 data/*
 !data/.gitkeep
 learnings

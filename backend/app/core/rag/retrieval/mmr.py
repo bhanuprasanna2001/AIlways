@@ -1,25 +1,12 @@
 import numpy as np
+from langchain_core.vectorstores.utils import (
+    _cosine_similarity as lc_cosine_similarity,
+)
 
 from app.core.rag.retrieval.filters import SearchResult
+from app.core.logger import setup_logger
 
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Compute cosine similarity between two vectors.
-
-    Args:
-        a: First vector.
-        b: Second vector.
-
-    Returns:
-        float: Cosine similarity in [-1, 1].
-    """
-    va = np.array(a, dtype=np.float32)
-    vb = np.array(b, dtype=np.float32)
-    norm_a = np.linalg.norm(va)
-    norm_b = np.linalg.norm(vb)
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return float(np.dot(va, vb) / (norm_a * norm_b))
+logger = setup_logger(__name__)
 
 
 def maximal_marginal_relevance(
@@ -28,19 +15,22 @@ def maximal_marginal_relevance(
     top_k: int = 7,
     lambda_param: float = 0.7,
 ) -> list[SearchResult]:
-    """Select diverse results using Maximum Marginal Relevance.
+    """Select diverse results using MMR with reranker-aware relevance.
 
-    Prevents redundancy — you do not want 5 chunks all saying the same
-    thing. Iteratively selects results that are both relevant to the
-    query and dissimilar to already-selected results.
+    Uses LangChain's vectorised cosine similarity for efficient
+    inter-document diversity computation, but keeps the reranker /
+    RRF score for the relevance signal — critical for correctness
+    when Cohere cross-encoder scores differ from cosine similarity.
+
+    MMR score = lambda * relevance(score) - (1-lambda) * max_sim(cosine)
 
     lambda_param controls the relevance vs diversity tradeoff:
       - 1.0 = pure relevance (no diversity penalty)
       - 0.0 = pure diversity (maximum dissimilarity)
       - 0.7 = default balance (biased toward relevance)
 
-    Results without embeddings are appended at the end in their original
-    order (they cannot participate in diversity computation).
+    Results without embeddings compete on relevance alone (no diversity
+    penalty). LangChain's cosine helper handles the matrix maths.
 
     Args:
         query_embedding: The query embedding vector.
@@ -57,62 +47,63 @@ def maximal_marginal_relevance(
     if len(results) <= top_k:
         return list(results)
 
-    # Separate results with and without embeddings
-    with_emb: list[tuple[int, SearchResult]] = []
-    without_emb: list[SearchResult] = []
+    n = len(results)
 
-    for i, r in enumerate(results):
-        if r.embedding is not None:
-            with_emb.append((i, r))
-        else:
-            without_emb.append(r)
+    # Pre-compute inter-document similarity matrix using LangChain's
+    # vectorised cosine. For results without embeddings, rows / cols
+    # default to 0 (no diversity penalty).
+    embeddings: list[list[float] | None] = [r.embedding for r in results]
+    has_emb = [e is not None for e in embeddings]
 
-    # If no embeddings available, fall back to original order
-    if not with_emb:
-        return results[:top_k]
+    emb_indices = [i for i, h in enumerate(has_emb) if h]
+    if emb_indices:
+        emb_matrix = np.array(
+            [embeddings[i] for i in emb_indices], dtype=np.float32
+        )
+        # Full pairwise cosine similarity (k×k matrix)
+        sim_matrix_small = lc_cosine_similarity(emb_matrix, emb_matrix)
 
-    # Pre-compute query similarity for each candidate
-    query_sims = {
-        i: _cosine_similarity(query_embedding, r.embedding)
-        for i, r in with_emb
-    }
+        # Expand to n×n — non-embedded rows/cols stay 0
+        sim_matrix = np.zeros((n, n), dtype=np.float32)
+        for r_idx, gi in enumerate(emb_indices):
+            for c_idx, gj in enumerate(emb_indices):
+                sim_matrix[gi][gj] = sim_matrix_small[r_idx][c_idx]
+    else:
+        sim_matrix = np.zeros((n, n), dtype=np.float32)
 
-    selected: list[SearchResult] = []
-    selected_embeddings: list[list[float]] = []
-    remaining = dict(with_emb)
+    # Greedy MMR selection
+    selected: list[int] = []
+    remaining = set(range(n))
 
     while len(selected) < top_k and remaining:
         best_idx = -1
-        best_score = float("-inf")
+        best_mmr = float("-inf")
 
-        for idx, result in remaining.items():
-            relevance = query_sims[idx]
+        for idx in remaining:
+            relevance = results[idx].score
 
-            # Max similarity to any already-selected result
-            if selected_embeddings:
-                max_sim = max(
-                    _cosine_similarity(result.embedding, sel_emb)
-                    for sel_emb in selected_embeddings
-                )
+            if selected:
+                max_sim = float(max(sim_matrix[idx][s] for s in selected))
             else:
                 max_sim = 0.0
 
             mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim
 
-            if mmr_score > best_score:
-                best_score = mmr_score
+            if mmr_score > best_mmr:
+                best_mmr = mmr_score
                 best_idx = idx
 
         if best_idx == -1:
             break
 
-        winner = remaining.pop(best_idx)
-        selected.append(winner)
-        selected_embeddings.append(winner.embedding)
+        selected.append(best_idx)
+        remaining.discard(best_idx)
 
-    # Fill remaining slots with results that had no embeddings
-    slots_left = top_k - len(selected)
-    if slots_left > 0:
-        selected.extend(without_emb[:slots_left])
+    output = [results[i] for i in selected]
 
-    return selected
+    logger.debug(
+        f"MMR selected {len(output)}/{n} results "
+        f"({len(emb_indices)} with embeddings, {n - len(emb_indices)} without)"
+    )
+
+    return output
