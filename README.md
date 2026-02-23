@@ -1,62 +1,141 @@
-# AIlways - Meeting Truth & Context Copilot
+# AIlways
+## Meeting Truth and Context Copilot
 
-1. Frontend - Next.js app
-2. Backend - Python & FastAPI app
+<p>
+  <img src="https://img.shields.io/badge/Frontend-Next.js%2016-black" alt="Next.js 16">
+  <img src="https://img.shields.io/badge/Backend-FastAPI-009688" alt="FastAPI">
+  <img src="https://img.shields.io/badge/Database-ParadeDB%20%2F%20Postgres-336791" alt="ParadeDB Postgres">
+  <img src="https://img.shields.io/badge/Cache-Redis-red" alt="Redis">
+  <img src="https://img.shields.io/badge/Parser-pdfplumber%20%2B%20custom-blue" alt="pdfplumber custom parser">
+</p>
 
+AIlways helps teams find reliable answers from internal company PDFs, with strong handling for tables that continue across pages.
 
-## Decisions
+## Summary
 
-#### Decision 1: The choice of dataset to build AIlways.
+- Problem: enterprise PDFs are hard to search reliably when table structure breaks across pages.
+- Build: full-stack internal tool foundation (auth-enabled app + API + custom parser).
+- Differentiator: table-aware parsing heuristics for multi-page continuity.
+- Evidence: parsed 830 PDFs in ~6.08 seconds on this repository workload.
 
-The dataset that I chose for building AIlways:
+## Why This Project
 
-1. Company Documents Dataset - Consists of 2,677 documents in pdf format. It has inventory reports, invoices, purchase orders, and shipping orders.
-   1. **Why I chose it:**
-      1. The dataset is relevant to the use case of AIlways, which is to help employees find information from company documents.
+| Problem | Approach | Result |
+| --- | --- | --- |
+| Company docs are hard to query because tables break across pages and lose structure. | Custom PDF parsing pipeline with table-aware post-processing on top of `pdfplumber`. | Faster, cleaner extraction that keeps table continuity and improves downstream retrieval quality. |
+| Internal tools need secure access control. | Cookie-based auth flow with CSRF checks and rate limits. | Practical base for production-like internal usage. |
 
-I went over multiple datasets:
+## What Is Built
 
-1. OpenRAG_Bench - Consists of 1000 arxiv papers which are extracted into json format. It has text, tables, and figures.
-   1. Why I didn't choose it:
-      1. The whole dataset is in JSON format
-2. Enron Email Dataset - Consists of 500k emails from Enron employees. It has text and attachments.
-   1. Why I didn't choose it:
-      1. The dataset is about fraudulent activities in Enron, which is not relevant to the use case of AIlways.
-3. And a few more datasets that I found on Kaggle and Hugging Face, but they were either too small or not relevant to the use case of AIlways.
+- `frontend/`: Next.js app with sign up, sign in, and protected dashboard.
+- `backend/`: FastAPI service with auth endpoints, sessions in Redis, and ParadeDB/Postgres integration.
+- `learnings/parsing/`: Custom CLI parser for text and table extraction from PDFs.
 
+## Architecture
 
-#### Decision 2: The choice of document parsing library.
+```mermaid
+flowchart LR
+    A[Company PDFs] --> B[Custom Parsing Pipeline]
+    B --> C[Structured Markdown or JSON]
+    C --> D[FastAPI Backend]
+    D --> E[(ParadeDB or Postgres)]
+    D --> F[(Redis Sessions)]
+    G[Next.js Frontend] <--> D
+    H[End User] --> G
+```
 
+## Parsing Highlights
 
+- Adaptive strategy selection for bordered vs borderless tables.
+- Multi-page table continuation detection using column alignment heuristics.
+- Automatic header deduplication when the same table header repeats on new pages.
+- Right-edge truncation repair for clipped last-column text.
+- CLI output in `markdown`, `json`, or `text`.
 
-## Frontend
+## Performance Snapshot
 
-To run the frontend, navigate to the `frontend` folder and run:
+Observed on this repository workload:
+
+```bash
+INFO     root  Processed 830 file(s).
+python -m parsing "../data/CompanyDocuments/PurchaseOrders/" -o output_dir/   5.52s user 0.26s system 95% cpu 6.080 total
+```
+
+- Total: ~6.08s for 830 PDFs
+- Average: ~0.007s per document
+
+## Key Decisions
+
+<details>
+<summary><strong>Dataset Selection</strong></summary>
+
+- Chosen dataset: company documents (2,677 PDFs including invoices, purchase orders, shipping docs, inventory reports).
+- Reason: directly matches the target use case of enterprise document search with table-heavy content.
+- Rejected options were less relevant (domain mismatch) or already pre-extracted to JSON.
+
+</details>
+
+<details>
+<summary><strong>Parsing Stack Selection</strong></summary>
+
+- Final base parser: `pdfplumber` + custom post-processing.
+- Why: strong control over extraction flow and enough speed for bulk parsing.
+- Alternatives tested: Docling, Unstructured, vLLM + Docling, vision-model API route.
+- Outcome: alternatives were slower and/or weaker for multi-page table continuity.
+
+</details>
+
+## Quick Start
+
+Prerequisites: Python 3.12+, Node.js 20+, Docker, and `uv`.
+
+### 1. Backend
+
+```bash
+cd backend
+cp .env.example .env
+docker compose up -d
+
+uv sync
+uv run alembic upgrade head
+uv run python -m app
+```
+
+Backend runs at `http://localhost:8080`  
+Health check: `GET http://localhost:8080/health`
+
+### 2. Frontend
 
 ```bash
 cd frontend
-
 npm install
 npm run dev
 ```
 
-## Backend
+Frontend runs at `http://localhost:3000`
 
-To run the backend, navigate to the `backend` folder and run:
+### 3. Run the parser
 
 ```bash
-cd backend
+cd learnings
+python -m parsing "../data/CompanyDocuments/PurchaseOrders/" -o output_dir/
+```
 
-docker compose up -d
+## Project Structure
 
-uv sync
-uv run python -m app
+```text
+.
+├── backend/            # FastAPI, auth, DB, Redis session handling
+├── frontend/           # Next.js UI and auth routes
+├── learnings/parsing/  # Custom PDF parsing pipeline
+├── data/               # Dataset directory
+└── README.md
 ```
 
 ## Contributing
 
-If you want to contribute to this project, please fork the repository and create a pull request with your changes. We welcome contributions of all kinds, including bug fixes, new features, and documentation improvements.
+Contributions are welcome. Open an issue or submit a pull request for fixes, features, or documentation improvements.
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for more details.
+MIT. See `LICENSE`.

@@ -20,7 +20,11 @@ dependencies = [
     "pyrate-limiter==4.0.2",
     "fastapi-limiter==0.2.0",
     "greenlet==3.3.1",
-    "unstructured==0.20.8",
+    "openai>=2.21.0",
+    "pgvector>=0.4.2",
+    "pymupdf4llm>=0.3.4",
+    "tiktoken>=0.12.0",
+    "aiofiles>=24.1.0",
 ]
 
 [project.optional-dependencies]

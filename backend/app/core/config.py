@@ -51,6 +51,19 @@ class Settings(BaseSettings):
     # Cookies
     SESSION_COOKIE_NAME: str = "session_id"
     CSRF_COOKIE_NAME: str = "csrf_token"
+
+    # OpenAI
+    OPENAI_API_KEY: str = ""
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-large"
+    OPENAI_EMBEDDING_DIMENSIONS: int = 1536
+    OPENAI_REASONING_MODEL: str = "gpt-4o"
+
+    # File Storage
+    FILE_STORE_PATH: str = "./data/uploads"
+
+    # Ingestion
+    MAX_FILE_SIZE_MB: int = 50
+    ALLOWED_FILE_TYPES: list[str] = ["pdf", "txt", "md"]
     
 
     @computed_field

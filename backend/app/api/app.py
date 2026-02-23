@@ -4,6 +4,9 @@ from fastapi.exceptions import RequestValidationError
 
 from app.api.routers import root
 from app.api.routers.auth.auth import router as auth_router
+from app.api.routers.vault.vault import router as vault_router
+from app.api.routers.documents.documents import router as documents_router
+from app.api.routers.query.query import router as query_router
 
 from app.api.lifespan import lifespan
 from app.core.config import Settings, get_settings
@@ -74,6 +77,9 @@ def register_routers(app: FastAPI) -> FastAPI:
     """
     app.include_router(root.router)
     app.include_router(auth_router)
+    app.include_router(vault_router)
+    app.include_router(documents_router)
+    app.include_router(query_router)
     return app
 
 
