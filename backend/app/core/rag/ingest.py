@@ -76,18 +76,36 @@ async def ingest_document(
             await _set_status(db, doc_id, "failed", error_message="No text content could be extracted")
             raise IngestionError("No text content could be extracted")
 
-        # 6. Embed
-        logger.info(f"Embedding {len(chunk_data_list)} chunks for document {doc_id}")
-        texts = [c.content_with_header for c in chunk_data_list]
-        hashes = [c.content_hash for c in chunk_data_list]
+        # 6. Embed (only child chunks — parents are not embedded)
+        logger.info(f"Embedding chunks for document {doc_id}")
+        child_indices = [
+            i for i, c in enumerate(chunk_data_list) if c.chunk_type == "child"
+        ]
+        child_texts = [chunk_data_list[i].content_with_header for i in child_indices]
+        child_hashes = [chunk_data_list[i].content_hash for i in child_indices]
 
-        # Check existing chunk hashes for idempotent re-embedding
         existing_hashes = await _get_existing_hashes(db, doc_id)
-        embeddings = await batch_embed(texts, hashes, embedder, existing_hashes)
+        child_embeddings = await batch_embed(child_texts, child_hashes, embedder, existing_hashes)
 
-        # 7. Upsert chunks in a single transaction
+        # Build index → embedding map for children
+        embedding_map: dict[int, list[float] | None] = {}
+        for pos, chunk_idx in enumerate(child_indices):
+            embedding_map[chunk_idx] = child_embeddings[pos]
+
+        logger.info(
+            f"Embedded {len(child_indices)} child chunks "
+            f"({len(chunk_data_list) - len(child_indices)} parents skipped)"
+        )
+
+        # 7. Upsert chunks — parents first, then children with parent_chunk_id
         logger.info(f"Storing {len(chunk_data_list)} chunks for document {doc_id}")
-        for cd, embedding in zip(chunk_data_list, embeddings):
+
+        # Map chunk_index → DB UUID (for resolving parent references)
+        index_to_uuid: dict[int, "UUID"] = {}
+
+        for i, cd in enumerate(chunk_data_list):
+            embedding = embedding_map.get(i)
+
             # Check if chunk already exists (re-ingestion)
             result = await db.execute(
                 select(Chunk).where(
@@ -98,20 +116,28 @@ async def ingest_document(
             )
             existing_chunk = result.scalars().first()
 
+            # Resolve parent reference
+            parent_chunk_id = None
+            if cd.parent_index is not None:
+                parent_chunk_id = index_to_uuid.get(cd.parent_index)
+
             if existing_chunk:
-                # Update if content changed
                 if existing_chunk.content_hash != cd.content_hash:
                     existing_chunk.content = cd.content
                     existing_chunk.content_with_header = cd.content_with_header
                     existing_chunk.content_hash = cd.content_hash
                     existing_chunk.token_count = cd.token_count
+                    existing_chunk.chunk_type = cd.chunk_type
+                    existing_chunk.parent_chunk_id = parent_chunk_id
                     existing_chunk.section_heading = cd.section_heading
+                    existing_chunk.section_level = cd.section_level
                     existing_chunk.page_number = cd.page_number
                     existing_chunk.char_start = cd.char_start
                     existing_chunk.char_end = cd.char_end
                     if embedding is not None:
                         existing_chunk.embedding = embedding
                     db.add(existing_chunk)
+                index_to_uuid[cd.chunk_index] = existing_chunk.id
             else:
                 chunk = Chunk(
                     doc_id=doc_id,
@@ -121,7 +147,10 @@ async def ingest_document(
                     content_hash=cd.content_hash,
                     token_count=cd.token_count,
                     chunk_index=cd.chunk_index,
+                    chunk_type=cd.chunk_type,
+                    parent_chunk_id=parent_chunk_id,
                     section_heading=cd.section_heading,
+                    section_level=cd.section_level,
                     page_number=cd.page_number,
                     char_start=cd.char_start,
                     char_end=cd.char_end,
@@ -129,6 +158,8 @@ async def ingest_document(
                     chunk_version=1,
                 )
                 db.add(chunk)
+                await db.flush()
+                index_to_uuid[cd.chunk_index] = chunk.id
 
         # 8. Mark as active
         await _set_status(db, doc_id, "active")

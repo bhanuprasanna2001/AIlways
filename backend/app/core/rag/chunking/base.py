@@ -15,7 +15,10 @@ class ChunkData(BaseModel):
     content_hash: str
     token_count: int
     chunk_index: int
+    chunk_type: str = "child"
+    parent_index: int | None = None
     section_heading: str | None = None
+    section_level: int | None = None
     page_number: int | None = None
     char_start: int = 0
     char_end: int = 0

@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-large"
     OPENAI_EMBEDDING_DIMENSIONS: int = 1536
     OPENAI_REASONING_MODEL: str = "gpt-4o"
+    OPENAI_QUERY_MODEL: str = "gpt-4o-mini"
+
+    # Cohere (optional — empty disables reranking)
+    COHERE_API_KEY: str = ""
 
     # File Storage
     FILE_STORE_PATH: str = "./data/uploads"

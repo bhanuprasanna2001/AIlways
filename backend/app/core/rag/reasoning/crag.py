@@ -91,6 +91,8 @@ async def _call_llm(client: AsyncOpenAI, model: str, user_message: str) -> str:
 def _build_context(results: list[SearchResult]) -> str:
     """Build the context string from search results.
 
+    Includes parent context when available for richer reasoning.
+
     Args:
         results: List of search results.
 
@@ -101,6 +103,8 @@ def _build_context(results: list[SearchResult]) -> str:
     for i, r in enumerate(results, 1):
         parts.append(f"--- Chunk {i} (score: {r.score:.3f}) ---")
         parts.append(r.content_with_header)
+        if r.parent_content:
+            parts.append(f"\n[Parent context]\n{r.parent_content}")
         parts.append("")
     return "\n".join(parts)
 

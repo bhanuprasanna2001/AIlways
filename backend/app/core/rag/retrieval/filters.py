@@ -12,3 +12,5 @@ class SearchResult(BaseModel):
     section_heading: str | None = None
     page_number: int | None = None
     original_filename: str | None = None
+    embedding: list[float] | None = None
+    parent_content: str | None = None

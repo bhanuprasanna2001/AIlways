@@ -102,12 +102,12 @@ async def upload_document(
     # Run synchronous ingestion pipeline (Phase 1 — blocking)
     from app.core.rag.ingest import ingest_document
     from app.core.rag.parsing.registry import get_parser
-    from app.core.rag.chunking.text_splitter import SentenceChunker
+    from app.core.rag.chunking.hierarchical import HierarchicalChunker
     from app.core.rag.embedding.openai import OpenAIEmbedder
 
     try:
         parser = get_parser(extension)
-        chunker = SentenceChunker()
+        chunker = HierarchicalChunker()
         embedder = OpenAIEmbedder(
             api_key=SETTINGS.OPENAI_API_KEY,
             model=SETTINGS.OPENAI_EMBEDDING_MODEL,

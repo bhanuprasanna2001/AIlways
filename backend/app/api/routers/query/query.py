@@ -8,8 +8,12 @@ from app.db.models import User
 from app.core.config import get_settings
 from app.core.auth.deps import get_current_user, require_vault_member
 from app.core.rag.embedding.openai import OpenAIEmbedder
-from app.core.rag.retrieval.dense_search import dense_search
+from app.core.rag.retrieval.hybrid_search import hybrid_search
+from app.core.rag.retrieval.reranker import get_reranker
+from app.core.rag.retrieval.mmr import maximal_marginal_relevance
+from app.core.rag.retrieval.parent_expander import expand_to_parents
 from app.core.rag.reasoning.crag import reason
+from app.core.rag.query.query_rewriter import rewrite_query
 from app.core.logger import setup_logger
 
 from app.api.routers.query.schemas import QueryRequest, QueryResponse
@@ -29,7 +33,8 @@ async def query_vault(
 ):
     """Query documents in a vault and receive a grounded, cited answer.
 
-    Pipeline: embed query → dense search → LLM reasoning → cited response.
+    Pipeline: rewrite → embed → hybrid search (dense + BM25) → RRF →
+    rerank → MMR → parent expand → reason → cite.
 
     Args:
         vault_id: The vault to query.
@@ -38,31 +43,59 @@ async def query_vault(
         db: The database session.
 
     Returns:
-        QueryResponse: The answer with citations and confidence.
+        QueryResponse: The answer with citations, confidence, and metadata.
     """
     await require_vault_member(vault_id, current_user, db)
 
-    # 1. Embed the query
+    # 1. Rewrite vague queries
+    rewritten = await rewrite_query(
+        query=body.query,
+        api_key=SETTINGS.OPENAI_API_KEY,
+        model=SETTINGS.OPENAI_QUERY_MODEL,
+    )
+    was_rewritten = rewritten != body.query
+
+    # 2. Embed the (rewritten) query
     embedder = OpenAIEmbedder(
         api_key=SETTINGS.OPENAI_API_KEY,
         model=SETTINGS.OPENAI_EMBEDDING_MODEL,
         dims=SETTINGS.OPENAI_EMBEDDING_DIMENSIONS,
     )
-    query_vectors = await embedder.embed([body.query])
+    query_vectors = await embedder.embed([rewritten])
     query_embedding = query_vectors[0]
 
-    # 2. Search
-    results = await dense_search(
+    # 3. Hybrid search (dense + BM25 concurrent, fused with RRF)
+    fused_results = await hybrid_search(
+        query_text=rewritten,
         query_embedding=query_embedding,
         vault_id=vault_id,
         db=db,
-        top_k=body.top_k,
+        top_k=30,
     )
 
-    # 3. Reason
+    # 4. Rerank
+    reranker = get_reranker(SETTINGS.COHERE_API_KEY)
+    reranked = await reranker.rerank(
+        query=rewritten,
+        results=fused_results,
+        top_k=20,
+    )
+
+    # 5. MMR for diversity
+    diverse = maximal_marginal_relevance(
+        query_embedding=query_embedding,
+        results=reranked,
+        top_k=body.top_k,
+        lambda_param=0.7,
+    )
+
+    # 6. Parent expansion
+    expanded = await expand_to_parents(diverse, db)
+
+    # 7. Reason
     reasoning = await reason(
-        query=body.query,
-        search_results=results,
+        query=rewritten,
+        search_results=expanded,
         api_key=SETTINGS.OPENAI_API_KEY,
         model=SETTINGS.OPENAI_REASONING_MODEL,
     )
@@ -72,5 +105,7 @@ async def query_vault(
         citations=reasoning.citations,
         confidence=reasoning.confidence,
         has_sufficient_evidence=reasoning.has_sufficient_evidence,
-        chunks_used=len(results),
+        chunks_used=len(expanded),
+        rewritten_query=rewritten if was_rewritten else None,
+        retrieval_method="hybrid",
     )

@@ -33,7 +33,8 @@ async def dense_search(
         SELECT c.id, c.doc_id, c.content, c.content_with_header,
                1 - (c.embedding <=> :query_vec) AS score,
                c.section_heading, c.page_number,
-               d.original_filename
+               d.original_filename,
+               c.embedding::float[] AS embedding
         FROM chunks c
         JOIN documents d ON c.doc_id = d.id
         WHERE c.vault_id = :vault_id
@@ -65,6 +66,7 @@ async def dense_search(
             section_heading=row[5],
             page_number=row[6],
             original_filename=row[7],
+            embedding=list(row[8]) if row[8] else None,
         )
         for row in rows
     ]

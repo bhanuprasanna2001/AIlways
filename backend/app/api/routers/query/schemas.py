@@ -35,3 +35,5 @@ class QueryResponse(BaseModel):
     confidence: float = 0.0
     has_sufficient_evidence: bool = False
     chunks_used: int = 0
+    rewritten_query: str | None = None
+    retrieval_method: str = "hybrid"
