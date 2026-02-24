@@ -1,5 +1,3 @@
-from datetime import datetime, timezone
-
 from sqlmodel import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,6 +6,7 @@ from app.core.kafka.topics import (
     EventType, FileDeletedEvent, AuditEvent, AUDIT_EVENTS, utcnow,
 )
 from app.db.models import Document, Chunk
+from app.db.models.utils import _utcnow_naive
 from app.workers.base import BaseWorker
 
 logger = setup_logger(__name__)
@@ -54,7 +53,7 @@ class DeletionWorker(BaseWorker):
             return
 
         # 3. Soft-delete the document
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = _utcnow_naive()
         doc.status = "deleted"
         doc.deleted_at = now
         doc.updated_at = now
@@ -65,12 +64,13 @@ class DeletionWorker(BaseWorker):
             select(Chunk).where(Chunk.doc_id == doc_id, Chunk.is_deleted == False)
         )
         chunks = chunk_result.scalars().all()
+        chunk_count = len(chunks)
         for chunk in chunks:
             chunk.is_deleted = True
             db.add(chunk)
 
         await db.commit()
-        logger.info(f"Deleted document {doc_id} and {len(chunks)} chunk(s)")
+        logger.info(f"Deleted document {doc_id} and {chunk_count} chunk(s)")
 
         # 5. Produce audit event
         await self._producer.send_event(
@@ -80,7 +80,7 @@ class DeletionWorker(BaseWorker):
                 vault_id=parsed.vault_id,
                 doc_id=doc_id,
                 user_id=parsed.deleted_by,
-                payload={"chunks_deleted": len(chunks)},
+                payload={"chunks_deleted": chunk_count},
                 timestamp=utcnow(),
             ),
         )

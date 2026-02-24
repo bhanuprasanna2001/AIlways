@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.db import get_db
 from app.db.models import User, Vault, VaultMember, Document
+from app.db.models.utils import _utcnow_naive
 from app.core.auth.deps import get_current_user, require_csrf, require_vault_member
 from app.api.routers.vault.schemas import VaultCreate, VaultUpdate, VaultResponse
 
@@ -151,8 +152,7 @@ async def update_vault(
     if body.description is not None:
         vault.description = body.description
 
-    from datetime import datetime, timezone
-    vault.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    vault.updated_at = _utcnow_naive()
 
     db.add(vault)
     await db.commit()
@@ -179,9 +179,8 @@ async def delete_vault(
     """
     vault, _ = await require_vault_member(vault_id, current_user, db, min_role="owner")
 
-    from datetime import datetime, timezone
     vault.is_active = False
-    vault.deleted_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    vault.deleted_at = _utcnow_naive()
 
     db.add(vault)
     await db.commit()

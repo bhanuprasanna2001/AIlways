@@ -77,6 +77,10 @@ export async function apiFetch<T>(
     throw new ApiError(401, "Session expired");
   }
 
+  // Reset the redirect guard on any successful response so future
+  // 401s (after re-authentication) can still trigger a redirect.
+  redirecting = false;
+
   const text = await res.text();
 
   // Handle empty responses (204, etc.)

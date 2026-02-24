@@ -11,9 +11,8 @@ from app.db.models import User
 
 from app.core.config import get_settings
 from app.core.auth.security import hash_password, verify_password
-from app.core.tools.redis import store_session, get_session, delete_session
 from app.core.auth.deps import get_current_user, require_csrf, SESSION_COOKIE_NAME, CSRF_COOKIE_NAME
-from app.core.tools.redis import store_session, get_session, delete_session, store_ws_ticket
+from app.core.tools.redis import store_session, delete_session, store_ws_ticket
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])

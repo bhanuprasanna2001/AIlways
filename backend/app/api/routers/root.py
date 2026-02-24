@@ -1,33 +1,33 @@
 from fastapi import APIRouter
-
-from dataclasses import dataclass
+from pydantic import BaseModel
 
 from app.core.config import get_settings
 
-@dataclass
-class Health:
+
+class HealthResponse(BaseModel):
+    """Health check response schema."""
+
     title: str
     version: str
     description: str
     status: str
 
+
 router = APIRouter()
 
+SETTINGS = get_settings()
 
-@router.get("/health", response_model=Health, tags=["Health Check"], summary="Check the health of the application")
+
+@router.get("/health", response_model=HealthResponse, tags=["Health Check"], summary="Check the health of the application")
 async def health():
     """Endpoint to check the health of the application.
 
-    Args:
-        None
-
     Returns:
-        Health: An object containing the health status and application information.
+        HealthResponse: Application metadata and status.
     """
-    settings = get_settings()
-    return Health(
-        title=settings.APP_TITLE,
-        version=settings.APP_VERSION,
-        description=settings.APP_DESCRIPTION,
-        status="I'm fine, fine, fine! :D"
+    return HealthResponse(
+        title=SETTINGS.APP_TITLE,
+        version=SETTINGS.APP_VERSION,
+        description=SETTINGS.APP_DESCRIPTION,
+        status="healthy",
     )

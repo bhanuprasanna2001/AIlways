@@ -1,10 +1,5 @@
 import { headers } from "next/headers";
-
-export type User = {
-  id: string;
-  name: string;
-  email: string;
-};
+import type { User } from "@/lib/types";
 
 /**
  * Server-only helper: calls backend /auth/me with forwarded cookies.

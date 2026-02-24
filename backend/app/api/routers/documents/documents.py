@@ -1,6 +1,5 @@
 import hashlib
 from uuid import UUID
-from datetime import datetime, timezone
 
 from sqlmodel import select, func
 from sqlalchemy import delete as sqlalchemy_delete
@@ -10,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from app.db import get_db
 from app.db.models import User, Document, Chunk
+from app.db.models.utils import _utcnow_naive
 from app.core.config import get_settings
 from app.core.auth.deps import get_current_user, require_csrf, require_vault_member
 from app.core.storage.local import LocalFileStore
@@ -229,19 +229,7 @@ async def list_documents(
     )
     documents = result.scalars().all()
 
-    return [
-        DocumentResponse(
-            id=doc.id,
-            original_filename=doc.original_filename,
-            file_type=doc.file_type,
-            file_size_bytes=doc.file_size_bytes,
-            status=doc.status,
-            error_message=doc.error_message,
-            page_count=doc.page_count,
-            created_at=doc.created_at,
-        )
-        for doc in documents
-    ]
+    return [DocumentResponse.from_model(doc) for doc in documents]
 
 
 @router.get("/{doc_id}", summary="Get document details")
@@ -275,16 +263,7 @@ async def get_document(
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    return DocumentResponse(
-        id=doc.id,
-        original_filename=doc.original_filename,
-        file_type=doc.file_type,
-        file_size_bytes=doc.file_size_bytes,
-        status=doc.status,
-        error_message=doc.error_message,
-        page_count=doc.page_count,
-        created_at=doc.created_at,
-    )
+    return DocumentResponse.from_model(doc)
 
 
 @router.get("/{doc_id}/status", summary="Poll document ingestion status")
@@ -434,7 +413,7 @@ async def delete_document(
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = _utcnow_naive()
 
     # --- Async path (Kafka available) ---
     producer = _get_producer(request)
@@ -500,10 +479,10 @@ async def parse_document(
         )
 
     extension = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
-    if extension not in {"pdf", "txt", "md"}:
+    if extension not in SETTINGS.ALLOWED_FILE_TYPES:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Unsupported file type: {extension}. Supported: pdf, txt, md",
+            detail=f"Unsupported file type: {extension}. Supported: {', '.join(SETTINGS.ALLOWED_FILE_TYPES)}",
         )
 
     content = await file.read()

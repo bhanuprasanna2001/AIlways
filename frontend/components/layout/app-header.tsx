@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { Menu, LogOut, ChevronDown, Settings } from "lucide-react";
 import { useSidebar } from "./sidebar-context";
 import { CONVERSATIONS_STORAGE_KEY } from "@/lib/constants";
+import { apiFetch } from "@/lib/api";
 import type { User } from "@/lib/types";
 
 const PAGE_TITLES: Record<string, string> = {
@@ -51,7 +52,7 @@ export default function AppHeader({ user }: { user: User }) {
     try {
       localStorage.removeItem(CONVERSATIONS_STORAGE_KEY);
     } catch { /* ignore */ }
-    fetch("/api/auth/logout", { method: "POST" }).finally(() => {
+    apiFetch("/api/auth/logout", { method: "POST" }).catch(() => {/* ignore */}).finally(() => {
       router.push("/signin");
       router.refresh();
     });

@@ -21,21 +21,11 @@ class Settings(BaseSettings):
     SERVER_RELOAD: bool = True
     SERVER_HOST: str = "0.0.0.0"
 
-    # Auth
-    JWT_SECRET_KEY: str = "unsafe"
-    JWT_ALGORITHM: str = "HS256"
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-
     # Database
     POSTGRES_USER: str = "myuser"
     POSTGRES_PASSWORD: str = "mypassword"
     POSTGRES_DB: str = "mydatabase"
     POSTGRES_PORT: int = 5434
-
-    # Pg Admin
-    PGADMIN_EMAIL: str | None = None
-    PGADMIN_PASSWORD: str | None = None
-    PGADMIN_PORT: int | None = None
 
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080", "http://localhost:8501"]
@@ -157,11 +147,15 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_config(self) -> "Settings":
         if self.ENV == "production":
-            assert "@db:" in self.DATABASE_URL, "Production DB URL must route to 'db' service"
-            assert "@redis:" in self.REDIS_URL, "Production Redis URL must route to 'redis' service"
+            if "@db:" not in self.DATABASE_URL:
+                raise ValueError("Production DB URL must route to 'db' service")
+            if "@redis:" not in self.REDIS_URL:
+                raise ValueError("Production Redis URL must route to 'redis' service")
         else:
-            assert "@localhost:" in self.DATABASE_URL, "Dev DB URL must route to localhost"
-            assert "@localhost:" in self.REDIS_URL, "Dev Redis URL must route to localhost"
+            if "@localhost:" not in self.DATABASE_URL:
+                raise ValueError("Dev DB URL must route to localhost")
+            if "@localhost:" not in self.REDIS_URL:
+                raise ValueError("Dev Redis URL must route to localhost")
         return self
 
 

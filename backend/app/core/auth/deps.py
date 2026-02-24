@@ -1,12 +1,15 @@
 from uuid import UUID
-from sqlmodel import select, func
+from sqlmodel import select
 from sqlalchemy.ext.asyncio.session import AsyncSession
-from fastapi import Cookie, Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, status
 
 from app.db import get_db
 from app.db.models import User, Vault, VaultMember
 from app.core.config import get_settings
 from app.core.tools.redis import get_session
+from app.core.logger import setup_logger
+
+logger = setup_logger(__name__)
 
 SETTINGS = get_settings()
 
@@ -32,7 +35,13 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_db))
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired or invalid")
 
-    result = await db.execute(select(User).where(User.id == UUID(user_id)))
+    try:
+        parsed_id = UUID(user_id)
+    except (ValueError, AttributeError):
+        logger.warning(f"Corrupt session data for session_id={session_id!r}")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
+
+    result = await db.execute(select(User).where(User.id == parsed_id))
     user = result.scalars().first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or invalid session")

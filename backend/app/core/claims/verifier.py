@@ -260,14 +260,11 @@ class RAGClaimVerifier:
                 SearchResult(
                     chunk_id=row.id,
                     doc_id=row.doc_id,
-                    content=row.content_with_header,
+                    content=row.content,
+                    content_with_header=row.content_with_header,
                     score=1.0,  # Exact match — highest confidence
-                    metadata={
-                        "chunk_index": row.chunk_index,
-                        "section_heading": row.section_heading,
-                        "page_number": row.page_number,
-                        "source": "exact_id",
-                    },
+                    section_heading=row.section_heading,
+                    page_number=row.page_number,
                 )
                 for row in rows
             ]

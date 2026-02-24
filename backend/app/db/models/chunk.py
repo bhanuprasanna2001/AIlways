@@ -1,6 +1,6 @@
 from uuid import UUID, uuid4
 from typing import Any
-from datetime import datetime, timezone
+from datetime import datetime
 from app.db.models.utils import _utcnow_naive
 from sqlalchemy import Column, UniqueConstraint, Text, ARRAY
 from sqlmodel import Field, SQLModel

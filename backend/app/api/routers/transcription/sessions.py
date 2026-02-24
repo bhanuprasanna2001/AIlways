@@ -16,6 +16,7 @@ from app.db.models.transcription_segment import TranscriptionSegment
 from app.db.models.transcription_claim import TranscriptionClaim
 from app.core.auth.deps import get_current_user, require_csrf
 from app.core.logger import setup_logger
+from app.db.models.utils import _utcnow_naive
 
 from app.api.routers.transcription.schemas import (
     SessionListResponse,
@@ -247,8 +248,6 @@ async def delete_session(
         current_user: The authenticated user.
         db: The database session.
     """
-    from datetime import datetime, timezone
-
     result = await db.execute(
         select(TranscriptionSession).where(
             TranscriptionSession.id == session_id,
@@ -263,5 +262,5 @@ async def delete_session(
             detail="Session not found",
         )
 
-    session.deleted_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    session.deleted_at = _utcnow_naive()
     await db.commit()

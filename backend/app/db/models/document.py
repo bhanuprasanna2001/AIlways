@@ -1,5 +1,5 @@
 from uuid import UUID, uuid4
-from datetime import datetime, timezone
+from datetime import datetime
 from app.db.models.utils import _utcnow_naive
 from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, SQLModel
