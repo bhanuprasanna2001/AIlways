@@ -682,12 +682,18 @@ async def _process_claims_batch(
             db_id = claim_db_ids.get(claim.id)
             if db_id:
                 try:
+                    # Convert Pydantic Evidence models to plain dicts
+                    # so json.dumps() in update_verdict can serialize them.
+                    evidence_dicts = [
+                        e.model_dump() if hasattr(e, "model_dump") else e
+                        for e in verdict.evidence
+                    ] if verdict.evidence else None
                     await persistence.update_verdict(
                         claim_id=db_id,
                         verdict=verdict.verdict,
                         confidence=verdict.confidence,
                         explanation=verdict.explanation,
-                        evidence=verdict.evidence,
+                        evidence=evidence_dicts,
                     )
                 except Exception as exc:
                     logger.error(f"Failed to persist verdict for '{claim.text[:50]}': {exc}")
@@ -949,7 +955,15 @@ class _SessionPersistence:
                 row.verdict = verdict
                 row.confidence = confidence
                 row.explanation = explanation
-                row.evidence_json = json_mod.dumps(evidence) if evidence else None
+                # Defensive: convert any remaining Pydantic models to dicts
+                if evidence:
+                    safe = [
+                        e.model_dump() if hasattr(e, "model_dump") else e
+                        for e in evidence
+                    ]
+                    row.evidence_json = json_mod.dumps(safe)
+                else:
+                    row.evidence_json = None
                 row.updated_at = now
                 await db.commit()
 
