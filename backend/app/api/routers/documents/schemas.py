@@ -30,3 +30,11 @@ class StatusResponse(BaseModel):
     status: str
     error_message: str | None
     updated_at: datetime
+
+
+class ContentResponse(BaseModel):
+    id: UUID
+    original_filename: str
+    file_type: str
+    markdown: str
+    char_count: int

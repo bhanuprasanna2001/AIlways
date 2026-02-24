@@ -46,7 +46,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.db_engine = engine
     logger.info("Database engine initialized")
 
-    # Kafka producer (optional — graceful degradation)
     app.state.kafka_producer = None
     if settings.KAFKA_ENABLED:
         producer = KafkaProducer(settings.KAFKA_BOOTSTRAP_SERVERS)

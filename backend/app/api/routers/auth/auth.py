@@ -73,6 +73,20 @@ class LoginIn(BaseModel):
     email: EmailStr
     password: str
 
+
+class UpdateMeIn(BaseModel):
+    name: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            raise ValueError("Name cannot be empty")
+        return v
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -188,6 +202,35 @@ async def get_me(current_user: User = Depends(get_current_user)):
     Returns:
         dict: The current user's information.
     """
+    return {
+        "id": str(current_user.id),
+        "name": current_user.name,
+        "email": current_user.email,
+    }
+
+
+@router.patch("/me", dependencies=[Depends(require_csrf)], summary="Update current user profile")
+async def update_me(
+    body: UpdateMeIn,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update the current user's profile.
+
+    Args:
+        body (UpdateMeIn): The fields to update.
+        current_user (User): The currently authenticated user.
+        db (AsyncSession): The database session.
+
+    Returns:
+        dict: The updated user information.
+    """
+    if body.name is not None:
+        current_user.name = body.name
+        db.add(current_user)
+        await db.commit()
+        await db.refresh(current_user)
+
     return {
         "id": str(current_user.id),
         "name": current_user.name,

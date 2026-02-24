@@ -17,7 +17,7 @@ from app.core.kafka.producer import KafkaProducer, KafkaProducerError
 from app.core.kafka.topics import FILE_EVENTS, FileUploadedEvent, FileDeletedEvent, utcnow
 from app.core.logger import setup_logger
 
-from app.api.routers.documents.schemas import DocumentResponse, UploadResponse, StatusResponse
+from app.api.routers.documents.schemas import DocumentResponse, UploadResponse, StatusResponse, ContentResponse
 
 
 logger = setup_logger(__name__)
@@ -322,6 +322,79 @@ async def get_document_status(
         status=doc.status,
         error_message=doc.error_message,
         updated_at=doc.updated_at,
+    )
+
+
+@router.get("/{doc_id}/content", summary="Get parsed document content as markdown")
+async def get_document_content(
+    vault_id: UUID,
+    doc_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Read the raw file from storage, re-parse it to markdown, and return.
+
+    Only active documents can have their content read. The raw file is
+    parsed on-demand using the same pipeline that produced the chunks —
+    this keeps storage simple (no extra parsed-markdown file on disk).
+
+    Args:
+        vault_id: The vault identifier.
+        doc_id: The document identifier.
+        current_user: The authenticated user.
+        db: The database session.
+
+    Returns:
+        ContentResponse: Parsed markdown, filename, file type.
+    """
+    await require_vault_member(vault_id, current_user, db)
+
+    result = await db.execute(
+        select(Document).where(
+            Document.id == doc_id,
+            Document.vault_id == vault_id,
+            Document.deleted_at == None,
+        )
+    )
+    doc = result.scalars().first()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    if doc.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Document is not ready (status: {doc.status})",
+        )
+
+    # Read raw file from storage
+    try:
+        file_bytes = await _file_store.get(doc.storage_path)
+    except (FileNotFoundError, ValueError):
+        logger.error(f"File not found on disk for document {doc_id}: {doc.storage_path}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document file not found on disk",
+        )
+
+    # Re-parse to markdown
+    from app.core.rag.parsing import get_parser
+
+    try:
+        parser = get_parser(doc.file_type)
+        markdown = await parser.parse(file_bytes, doc.original_filename)
+    except (ValueError, Exception) as e:
+        logger.error(f"Failed to parse document {doc_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to parse document content",
+        )
+
+    return ContentResponse(
+        id=doc.id,
+        original_filename=doc.original_filename,
+        file_type=doc.file_type,
+        markdown=markdown,
+        char_count=len(markdown),
     )
 
 
