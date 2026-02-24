@@ -93,6 +93,11 @@ def _sanitize_query(query: str) -> str:
     Removes special characters that could break the ParadeDB query
     parser, limits length, and collapses whitespace.
 
+    Number normalization: Thousand-separator commas are collapsed
+    **before** general sanitisation so that ``10,248`` becomes the
+    single token ``10248`` (matching how numbers appear in documents)
+    rather than two tokens ``10`` and ``248``.
+
     Args:
         query: Raw user query.
 
@@ -100,6 +105,8 @@ def _sanitize_query(query: str) -> str:
         str: Cleaned query string, or empty if invalid.
     """
     cleaned = query.strip()[:_MAX_QUERY_LENGTH]
+    # Collapse thousand-separator commas: 10,248 → 10248
+    cleaned = re.sub(r"(\d),(\d)", r"\1\2", cleaned)
     cleaned = re.sub(r"[^\w\s\-.$#@/]", " ", cleaned, flags=re.UNICODE)
     cleaned = " ".join(cleaned.split())
     return cleaned

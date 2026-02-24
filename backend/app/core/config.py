@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     PGADMIN_PORT: int | None = None
 
     # CORS
-    CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080"]
+    CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080", "http://localhost:8501"]
     CORS_METHODS: List[str] = ["*"]
     CORS_HEADERS: List[str] = ["*"]
     CORS_ALLOW_CREDENTIALS: bool = True
@@ -61,6 +61,34 @@ class Settings(BaseSettings):
 
     # Cohere (optional — empty disables reranking)
     COHERE_API_KEY: str = ""
+
+    # Deepgram (transcription + diarization)
+    DEEPGRAM_API_KEY: str = ""
+    DEEPGRAM_MODEL: str = "nova-3"
+    DEEPGRAM_LANGUAGE: str = "en"
+
+    # Groq (fast LLM for claim detection)
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+
+    # Transcription / Claims pipeline
+    CLAIM_DETECTION_ENABLED: bool = True
+    CLAIM_BATCH_INTERVAL_S: float = 6.0
+    CLAIM_VERIFICATION_TOP_K: int = 5
+    CLAIM_CONTEXT_SEGMENTS: int = 10
+    CLAIM_FLUSH_INTERVAL_S: float = 1.0
+    CLAIM_IDLE_TIMEOUT_S: float = 2.0
+    CLAIM_MAX_BUFFER_SEGMENTS: int = 100
+    CLAIM_MIN_SEGMENTS: int = 1
+    CLAIM_MIN_CHARS: int = 20
+    CLAIM_DEDUP_THRESHOLD: float = 0.8
+    CLAIM_SEGMENT_MIN_WORDS: int = 3
+    CLAIM_SEGMENT_MIN_CONFIDENCE: float = 0.5
+    CLAIM_GROQ_MAX_RETRIES: int = 3
+    CLAIM_DRAIN_TIMEOUT_S: float = 2.0
+    CLAIM_TASK_TIMEOUT_S: float = 15.0
+    CLAIM_MAX_CONCURRENT_TASKS: int = 5
+    CLAIM_VERIFICATION_MMR_LAMBDA: float = 1.0
 
     # File Storage
     FILE_STORE_PATH: str = "./data/uploads"

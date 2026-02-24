@@ -26,6 +26,7 @@ async def hybrid_search(
     vault_id: UUID,
     db: AsyncSession,
     top_k: int = 5,
+    mmr_lambda: float = 0.7,
 ) -> list[SearchResult]:
     """Run dense + BM25 search, fuse with RRF, diversify with MMR.
 
@@ -39,9 +40,11 @@ async def hybrid_search(
         vault_id: Scope search to this vault.
         db: Async database session.
         top_k: Final number of results after MMR.
+        mmr_lambda: Trade-off — 1.0 = pure relevance, 0.0 = pure diversity.
+            For claim verification use 1.0 to maximize relevance.
 
     Returns:
-        list[SearchResult]: Diverse, high-quality results.
+        list[SearchResult]: High-quality results.
     """
     # Fetch more candidates than needed for RRF + MMR to operate on
     fetch_k = max(top_k * 4, 20)
@@ -58,7 +61,9 @@ async def hybrid_search(
     fused = reciprocal_rank_fusion([dense_results, sparse_results])
 
     # Diversify with MMR
-    diverse = maximal_marginal_relevance(query_embedding, fused, top_k=top_k)
+    diverse = maximal_marginal_relevance(
+        query_embedding, fused, top_k=top_k, lambda_param=mmr_lambda,
+    )
 
     return diverse
 
