@@ -1,4 +1,5 @@
 from uuid import UUID
+from datetime import datetime
 from sqlmodel import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -20,6 +21,11 @@ router = APIRouter(prefix="/vaults", tags=["vaults"])
 async def _vault_response(vault: Vault, role: str, db: AsyncSession) -> VaultResponse:
     """Build a VaultResponse with the document count.
 
+    Computes an effective ``updated_at`` as the latest of the vault's own
+    timestamp and the most recently modified document.  This serves as a
+    safety net so that "Latest Activity" stays accurate even if a
+    write-time vault-touch was missed.
+
     Args:
         vault: The vault model instance.
         role: The caller's role in this vault.
@@ -29,12 +35,22 @@ async def _vault_response(vault: Vault, role: str, db: AsyncSession) -> VaultRes
         VaultResponse: The serialized vault with doc count.
     """
     result = await db.execute(
-        select(func.count(Document.id)).where(
+        select(
+            func.count(Document.id),
+            func.max(Document.updated_at),
+        ).where(
             Document.vault_id == vault.id,
             Document.deleted_at == None,
         )
     )
-    doc_count = result.scalar() or 0
+    row = result.one()
+    doc_count: int = row[0] or 0
+    latest_doc_activity: datetime | None = row[1]
+
+    # Effective updated_at: latest of vault-level and doc-level activity
+    effective_updated = vault.updated_at
+    if latest_doc_activity and latest_doc_activity > vault.updated_at:
+        effective_updated = latest_doc_activity
 
     return VaultResponse(
         id=vault.id,
@@ -44,7 +60,7 @@ async def _vault_response(vault: Vault, role: str, db: AsyncSession) -> VaultRes
         role=role,
         document_count=doc_count,
         created_at=vault.created_at,
-        updated_at=vault.updated_at,
+        updated_at=effective_updated,
     )
 
 

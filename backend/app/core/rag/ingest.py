@@ -35,6 +35,7 @@ from sqlmodel import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Document, Chunk
+from app.db.models.utils import touch_vault_updated_at
 from app.core.rag.parsing import get_parser
 from app.core.rag.chunking import get_chunker
 from app.core.rag.chunking.base import ChunkData
@@ -146,6 +147,9 @@ async def ingest_document(
         doc.error_message = None
         doc.updated_at = _now()
         db.add(doc)
+
+        # 7. Touch vault so "Latest Activity" reflects ingestion completion
+        await touch_vault_updated_at(db, vault_id)
 
         await db.commit()
 
@@ -313,6 +317,11 @@ async def batch_embed_and_store(
                 await _set_status(db, pdoc.doc_id, "failed", error_message=str(e)[:500])
             except Exception:
                 pass
+
+    # Touch vault timestamps for all vaults that had successful ingestions
+    updated_vault_ids = {pdoc.vault_id for pdoc, _, _ in doc_offsets if pdoc.doc_id in results}
+    for vid in updated_vault_ids:
+        await touch_vault_updated_at(db, vid)
 
     await db.commit()
     logger.info(f"Batch complete: {len(results)}/{len(prepared)} documents stored, {total_chunks} chunks")

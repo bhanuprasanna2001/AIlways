@@ -6,7 +6,7 @@ from app.core.kafka.topics import (
     EventType, FileDeletedEvent, AuditEvent, AUDIT_EVENTS, utcnow,
 )
 from app.db.models import Document, Chunk
-from app.db.models.utils import _utcnow_naive
+from app.db.models.utils import _utcnow_naive, touch_vault_updated_at
 from app.workers.base import BaseWorker
 
 logger = setup_logger(__name__)
@@ -69,10 +69,13 @@ class DeletionWorker(BaseWorker):
             chunk.is_deleted = True
             db.add(chunk)
 
+        # 5. Touch vault so "Latest Activity" reflects the deletion
+        await touch_vault_updated_at(db, parsed.vault_id)
+
         await db.commit()
         logger.info(f"Deleted document {doc_id} and {chunk_count} chunk(s)")
 
-        # 5. Produce audit event
+        # 6. Produce audit event
         await self._producer.send_event(
             AUDIT_EVENTS,
             AuditEvent(

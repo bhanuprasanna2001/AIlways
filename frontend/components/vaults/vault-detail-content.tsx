@@ -37,6 +37,7 @@ export default function VaultDetailContent({ vaultId }: Props) {
     data: vault,
     isLoading: vaultLoading,
     error: vaultError,
+    mutate: mutateVault,
   } = useSWR<Vault>(`/api/vaults/${vaultId}`, fetcher);
 
   // ---- Documents with conditional polling ----
@@ -81,6 +82,7 @@ export default function VaultDetailContent({ vaultId }: Props) {
         method: "DELETE",
       });
       await mutateDocs();
+      await mutateVault();
       setDeleteDoc(null);
     } catch (err) {
       setDeleteError(
@@ -93,7 +95,8 @@ export default function VaultDetailContent({ vaultId }: Props) {
 
   const onUploadComplete = useCallback(() => {
     mutateDocs();
-  }, [mutateDocs]);
+    mutateVault();
+  }, [mutateDocs, mutateVault]);
 
   // ---- Open document preview ----
   const openPreview = useCallback(

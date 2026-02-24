@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from app.db import get_db
 from app.db.models import User, Document, Chunk
-from app.db.models.utils import _utcnow_naive
+from app.db.models.utils import _utcnow_naive, touch_vault_updated_at
 from app.core.config import get_settings
 from app.core.auth.deps import get_current_user, require_csrf, require_vault_member
 from app.core.storage.local import LocalFileStore
@@ -141,6 +141,11 @@ async def upload_document(
         status="pending",
     )
     db.add(doc)
+    await db.flush()
+
+    # Touch vault timestamp so "Latest Activity" reflects the upload
+    await touch_vault_updated_at(db, vault_id)
+
     await db.commit()
     await db.refresh(doc)
 
@@ -421,6 +426,10 @@ async def delete_document(
         doc.status = "pending_delete"
         doc.updated_at = now
         db.add(doc)
+
+        # Touch vault timestamp so "Latest Activity" reflects the deletion
+        await touch_vault_updated_at(db, vault_id)
+
         await db.commit()
 
         event = FileDeletedEvent(
@@ -444,6 +453,9 @@ async def delete_document(
     for chunk in result.scalars().all():
         chunk.is_deleted = True
         db.add(chunk)
+
+    # Touch vault timestamp so "Latest Activity" reflects the deletion
+    await touch_vault_updated_at(db, vault_id)
 
     await db.commit()
     return {"message": "Document deleted"}
