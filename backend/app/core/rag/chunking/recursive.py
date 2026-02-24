@@ -97,12 +97,6 @@ def _source_label(filename: str) -> str:
 
     Strips the extension and replaces underscores/hyphens with spaces
     so that BM25 search for ``'invoice 10248'`` matches the header.
-
-    Args:
-        filename: Original filename (e.g. ``'invoice_10248.md'``).
-
-    Returns:
-        str: Label (e.g. ``'invoice 10248'``).
     """
     stem = filename.rsplit(".", 1)[0] if "." in filename else filename
     return stem.replace("_", " ").replace("-", " ")

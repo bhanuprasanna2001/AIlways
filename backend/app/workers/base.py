@@ -39,41 +39,24 @@ class BaseWorker(ABC):
 
     @abstractmethod
     async def handle_event(self, event: dict, db: AsyncSession) -> None:
-        """Process a single event. Override in subclasses.
-
-        Args:
-            event: Deserialized JSON event payload.
-            db: A fresh database session for this event.
-        """
+        """Process a single event. Override in subclasses."""
         ...
 
     async def handle_batch(self, events: list[dict], db: AsyncSession) -> None:
         """Process a batch of events. Override for batch optimisations.
 
         Default implementation calls handle_event() sequentially.
-
-        Args:
-            events: List of deserialized JSON event payloads.
-            db: Database session shared across the batch.
         """
         for event in events:
             await self.handle_event(event, db)
 
     async def _dispatch(self, event: dict) -> None:
-        """Wrap handle_event with a database session (single-event mode).
-
-        Args:
-            event: Deserialized JSON event payload.
-        """
+        """Wrap handle_event with a database session (single-event mode)."""
         async with self._session_factory() as db:
             await self.handle_event(event, db)
 
     async def _dispatch_batch(self, events: list[dict]) -> None:
-        """Wrap handle_batch with a database session (batch mode).
-
-        Args:
-            events: List of deserialized JSON event payloads.
-        """
+        """Wrap handle_batch with a database session (batch mode)."""
         async with self._session_factory() as db:
             await self.handle_batch(events, db)
 

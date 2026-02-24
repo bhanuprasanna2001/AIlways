@@ -7,7 +7,7 @@ import json
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from app.core.rag.retrieval.base import SearchResult
+from app.core.rag.retrieval.base import SearchResult, build_retrieval_context
 from app.core.rag.generation.base import Citation, AnswerResult
 from app.core.logger import setup_logger
 
@@ -94,7 +94,7 @@ class OpenAIGenerator:
         if not results:
             return _INSUFFICIENT
 
-        context = _build_context(results)
+        context = build_retrieval_context(results)
         user_message = _USER_TEMPLATE.format(context=context, query=query)
 
         try:
@@ -112,32 +112,9 @@ class OpenAIGenerator:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _build_context(results: list[SearchResult]) -> str:
-    """Build the context string from search results.
-
-    Args:
-        results: Retrieved chunks.
-
-    Returns:
-        str: Formatted context for the LLM prompt.
-    """
-    parts: list[str] = []
-    for i, r in enumerate(results, 1):
-        parts.append(f"--- Chunk {i} (score: {r.score:.3f}) ---")
-        parts.append(r.content_with_header)
-        parts.append("")
-    return "\n".join(parts)
-
 
 def _parse_response(raw: str) -> AnswerResult:
-    """Parse the LLM JSON response into an AnswerResult.
-
-    Args:
-        raw: Raw JSON string from the LLM.
-
-    Returns:
-        AnswerResult: Parsed result, or insufficient if parsing fails.
-    """
+    """Parse the LLM JSON response into an AnswerResult."""
     try:
         data = json.loads(raw)
 

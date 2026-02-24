@@ -19,23 +19,9 @@ class Embedder(Protocol):
     """
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """Embed a batch of texts.
-
-        Args:
-            texts: List of text strings to embed.
-
-        Returns:
-            list[list[float]]: Embedding vectors, one per input text.
-        """
+        """Embed a batch of texts and return one vector per input."""
         ...
 
     async def embed_query(self, text: str) -> list[float]:
-        """Embed a single query string.
-
-        Args:
-            text: Query text to embed.
-
-        Returns:
-            list[float]: Embedding vector.
-        """
+        """Embed a single query string."""
         ...

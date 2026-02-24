@@ -29,11 +29,6 @@ class DeepgramTranscriber:
         to DeepGram's REST API and returns a full ``TranscriptResult``.
       - **Live streaming:** ``live_session()`` opens an async-context-managed
         WebSocket to DeepGram for real-time transcription.
-
-    Args:
-        api_key: DeepGram API key.
-        model: DeepGram model name (default ``'nova-3'``).
-        language: Language code (default ``'en'``).
     """
 
     def __init__(self, api_key: str, model: str = "nova-3", language: str = "en") -> None:
@@ -88,14 +83,7 @@ class DeepgramTranscriber:
         """Parse DeepGram pre-recorded response into TranscriptResult.
 
         Uses ``utterances`` for speaker-diarized segments when available,
-        falling back to word-level speaker grouping from the first
-        channel alternative.
-
-        Args:
-            response: DeepGram ``ListenV1Response``.
-
-        Returns:
-            TranscriptResult: Parsed and structured transcript.
+        falling back to word-level speaker grouping.
         """
         try:
             channel = response.results.channels[0]
@@ -150,14 +138,7 @@ class DeepgramTranscriber:
     def _group_words_by_speaker(words: list) -> list[TranscriptSegment]:
         """Group consecutive words by speaker into segments.
 
-        When utterances are not available, this falls back to grouping
-        words from the same speaker together.
-
-        Args:
-            words: List of DeepGram word objects.
-
-        Returns:
-            list[TranscriptSegment]: Grouped segments.
+        Fallback when utterances are not available.
         """
         if not words:
             return []
@@ -291,11 +272,7 @@ class DeepgramLiveConnection:
         self._multichannel = multichannel
 
     async def send_audio(self, audio_chunk: bytes) -> None:
-        """Send an audio chunk to the live transcription stream.
-
-        Args:
-            audio_chunk: Raw audio bytes.
-        """
+        """Send an audio chunk to the live transcription stream."""
         if self._closed:
             return
         try:

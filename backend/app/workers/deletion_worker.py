@@ -59,15 +59,14 @@ class DeletionWorker(BaseWorker):
         doc.updated_at = now
         db.add(doc)
 
-        # 4. Mark all chunks as deleted
-        chunk_result = await db.execute(
-            select(Chunk).where(Chunk.doc_id == doc_id, Chunk.is_deleted == False)
+        # 4. Mark all chunks as deleted (bulk update)
+        from sqlalchemy import update as sa_update
+        chunk_count_result = await db.execute(
+            sa_update(Chunk)
+            .where(Chunk.doc_id == doc_id, Chunk.is_deleted == False)
+            .values(is_deleted=True)
         )
-        chunks = chunk_result.scalars().all()
-        chunk_count = len(chunks)
-        for chunk in chunks:
-            chunk.is_deleted = True
-            db.add(chunk)
+        chunk_count = chunk_count_result.rowcount
 
         # 5. Touch vault so "Latest Activity" reflects the deletion
         await touch_vault_updated_at(db, parsed.vault_id)

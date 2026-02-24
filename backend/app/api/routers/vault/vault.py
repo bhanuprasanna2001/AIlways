@@ -19,20 +19,10 @@ router = APIRouter(prefix="/vaults", tags=["vaults"])
 # ---------------------------------------------------------------------------
 
 async def _vault_response(vault: Vault, role: str, db: AsyncSession) -> VaultResponse:
-    """Build a VaultResponse with the document count.
+    """Build a VaultResponse with document count and effective updated_at.
 
     Computes an effective ``updated_at`` as the latest of the vault's own
-    timestamp and the most recently modified document.  This serves as a
-    safety net so that "Latest Activity" stays accurate even if a
-    write-time vault-touch was missed.
-
-    Args:
-        vault: The vault model instance.
-        role: The caller's role in this vault.
-        db: The database session.
-
-    Returns:
-        VaultResponse: The serialized vault with doc count.
+    timestamp and the most recently modified document.
     """
     result = await db.execute(
         select(
@@ -74,16 +64,7 @@ async def create_vault(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new vault. The caller becomes the owner.
-
-    Args:
-        body: Vault creation payload.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        VaultResponse: The created vault.
-    """
+    """Create a new vault. The caller becomes the owner."""
     vault = Vault(owner_id=current_user.id, name=body.name, description=body.description)
     db.add(vault)
     await db.flush()
@@ -101,15 +82,7 @@ async def list_vaults(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all vaults where the current user holds membership.
-
-    Args:
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        list[VaultResponse]: List of vaults.
-    """
+    """List all vaults where the current user holds membership."""
     result = await db.execute(
         select(Vault, VaultMember.role)
         .join(VaultMember, VaultMember.vault_id == Vault.id)
@@ -129,16 +102,7 @@ async def get_vault(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get details for a single vault.
-
-    Args:
-        vault_id: The vault identifier.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        VaultResponse: The vault details.
-    """
+    """Get details for a single vault."""
     vault, member = await require_vault_member(vault_id, current_user, db)
     return await _vault_response(vault, member.role, db)
 
@@ -150,17 +114,7 @@ async def update_vault(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update vault name or description. Requires editor or owner role.
-
-    Args:
-        vault_id: The vault identifier.
-        body: Fields to update.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        VaultResponse: The updated vault.
-    """
+    """Update vault name or description. Requires editor or owner role."""
     vault, member = await require_vault_member(vault_id, current_user, db, min_role="editor")
 
     if body.name is not None:
@@ -183,16 +137,7 @@ async def delete_vault(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Soft-delete a vault. Only the owner can do this.
-
-    Args:
-        vault_id: The vault identifier.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        dict: Success message.
-    """
+    """Soft-delete a vault. Only the owner can do this."""
     vault, _ = await require_vault_member(vault_id, current_user, db, min_role="owner")
 
     vault.is_active = False

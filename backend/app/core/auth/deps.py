@@ -1,12 +1,12 @@
 from uuid import UUID
 from sqlmodel import select
 from sqlalchemy.ext.asyncio.session import AsyncSession
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, WebSocket, status
 
 from app.db import get_db
 from app.db.models import User, Vault, VaultMember
 from app.core.config import get_settings
-from app.core.tools.redis import get_session
+from app.core.tools.redis import get_session, consume_ws_ticket
 from app.core.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -18,15 +18,7 @@ CSRF_COOKIE_NAME = SETTINGS.CSRF_COOKIE_NAME
 
 
 async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User:
-    """Dependency to get the current authenticated user based on the session cookie.
-
-    Args:
-        request: The incoming HTTP request.
-        db: The database session.
-
-    Returns:
-        User: The authenticated user.
-    """
+    """Get the current authenticated user from the session cookie."""
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
     if not session_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
@@ -50,14 +42,7 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_db))
 
 
 async def require_csrf(request: Request):
-    """Dependency to enforce CSRF protection on state-changing requests (POST, PUT, PATCH, DELETE).
-
-    Args:
-        request: The incoming HTTP request.
-    
-    Returns:
-        None
-    """
+    """Enforce CSRF protection on state-changing requests."""
     if request.method in ("POST", "PUT", "PATCH", "DELETE"):
         csrf_token_cookie = request.cookies.get(CSRF_COOKIE_NAME)
         csrf_token_header = request.headers.get("X-CSRF-Token")
@@ -78,20 +63,7 @@ async def require_vault_member(
     db: AsyncSession,
     min_role: str = "viewer",
 ) -> tuple[Vault, VaultMember]:
-    """Verify the user is a member of the vault with at least the given role.
-
-    Args:
-        vault_id: The vault to check.
-        user: The authenticated user.
-        db: The database session.
-        min_role: Minimum required role ('viewer', 'editor', or 'owner').
-
-    Returns:
-        tuple[Vault, VaultMember]: The vault and membership record.
-
-    Raises:
-        HTTPException: 404 if vault not found or soft-deleted, 403 if insufficient role.
-    """
+    """Verify the user is a vault member with at least ``min_role``."""
     result = await db.execute(
         select(Vault).where(Vault.id == vault_id, Vault.is_active == True, Vault.deleted_at == None)
     )
@@ -110,4 +82,53 @@ async def require_vault_member(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
 
     return vault, member
+
+
+# ---------------------------------------------------------------------------
+# WebSocket authentication
+# ---------------------------------------------------------------------------
+
+async def authenticate_websocket(
+    websocket: WebSocket, db: AsyncSession,
+) -> User | None:
+    """Authenticate a WebSocket via ticket, query param, or cookie.
+
+    Returns the authenticated User, or None (after closing the socket).
+    """
+    user_id: str | None = None
+
+    # 1. One-time WS ticket (frontend flow)
+    ticket = websocket.query_params.get("ticket")
+    if ticket:
+        user_id = await consume_ws_ticket(ticket)
+
+    # 2. Session ID query param (Streamlit cross-origin)
+    if not user_id:
+        session_id = websocket.query_params.get("session_id")
+        if session_id:
+            user_id = await get_session(session_id)
+
+    # 3. Session cookie (same-origin)
+    if not user_id:
+        session_id = websocket.cookies.get(SESSION_COOKIE_NAME)
+        if session_id:
+            user_id = await get_session(session_id)
+
+    if not user_id:
+        await websocket.close(code=4001, reason="Not authenticated")
+        return None
+
+    try:
+        parsed_id = UUID(user_id)
+    except (ValueError, AttributeError):
+        await websocket.close(code=4001, reason="Invalid session")
+        return None
+
+    result = await db.execute(select(User).where(User.id == parsed_id))
+    user = result.scalars().first()
+    if not user:
+        await websocket.close(code=4001, reason="User not found")
+        return None
+
+    return user
 

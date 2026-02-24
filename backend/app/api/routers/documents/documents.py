@@ -32,14 +32,7 @@ _file_store = LocalFileStore(SETTINGS.FILE_STORE_PATH)
 # ---------------------------------------------------------------------------
 
 def _get_producer(request: Request) -> KafkaProducer | None:
-    """Get the Kafka producer from app state, if available.
-
-    Args:
-        request: The incoming HTTP request.
-
-    Returns:
-        KafkaProducer or None if Kafka is disabled/unavailable.
-    """
+    """Get the Kafka producer from app state, or None if unavailable."""
     producer = getattr(request.app.state, "kafka_producer", None)
     if producer and producer.is_connected and SETTINGS.KAFKA_ENABLED:
         return producer
@@ -62,16 +55,6 @@ async def upload_document(
 
     When Kafka is available: saves file, produces event, returns 202 Accepted.
     When Kafka is disabled: runs synchronous ingestion (Phase 1 fallback).
-
-    Args:
-        vault_id: The vault to upload into.
-        request: The HTTP request (for accessing app state).
-        file: The uploaded file.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        UploadResponse: Document ID, filename, status, and chunk count.
     """
     vault, _ = await require_vault_member(vault_id, current_user, db, min_role="editor")
 
@@ -214,16 +197,7 @@ async def list_documents(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all non-deleted documents in the vault.
-
-    Args:
-        vault_id: The vault identifier.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        list[DocumentResponse]: List of documents.
-    """
+    """List all non-deleted documents in the vault."""
     await require_vault_member(vault_id, current_user, db)
 
     result = await db.execute(
@@ -244,17 +218,7 @@ async def get_document(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get details for a single document.
-
-    Args:
-        vault_id: The vault identifier.
-        doc_id: The document identifier.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        DocumentResponse: The document details.
-    """
+    """Get details for a single document."""
     await require_vault_member(vault_id, current_user, db)
 
     result = await db.execute(
@@ -278,17 +242,7 @@ async def get_document_status(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Poll the current ingestion status of a document.
-
-    Args:
-        vault_id: The vault identifier.
-        doc_id: The document identifier.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        StatusResponse: Current status and error info.
-    """
+    """Poll the current ingestion status of a document."""
     await require_vault_member(vault_id, current_user, db)
 
     result = await db.execute(
@@ -319,17 +273,7 @@ async def get_document_content(
     """Read the raw file from storage, re-parse it to markdown, and return.
 
     Only active documents can have their content read. The raw file is
-    parsed on-demand using the same pipeline that produced the chunks —
-    this keeps storage simple (no extra parsed-markdown file on disk).
-
-    Args:
-        vault_id: The vault identifier.
-        doc_id: The document identifier.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        ContentResponse: Parsed markdown, filename, file type.
+    parsed on-demand using the same pipeline that produced the chunks.
     """
     await require_vault_member(vault_id, current_user, db)
 
@@ -394,16 +338,6 @@ async def delete_document(
 
     When Kafka is available: sets status to pending_delete, produces event.
     When Kafka is disabled: performs synchronous soft-delete.
-
-    Args:
-        vault_id: The vault identifier.
-        doc_id: The document identifier.
-        request: The HTTP request.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        dict: Success message.
     """
     await require_vault_member(vault_id, current_user, db, min_role="editor")
 
@@ -450,7 +384,8 @@ async def delete_document(
     result = await db.execute(
         select(Chunk).where(Chunk.doc_id == doc_id, Chunk.is_deleted == False)
     )
-    for chunk in result.scalars().all():
+    chunks = result.scalars().all()
+    for chunk in chunks:
         chunk.is_deleted = True
         db.add(chunk)
 
@@ -470,17 +405,7 @@ async def parse_document(
 ):
     """Parse a file and return the extracted markdown without storing anything.
 
-    Useful for previewing parser output before uploading. No database
-    records or storage side-effects are created.
-
-    Args:
-        vault_id: The vault context (used for auth check only).
-        file: The file to parse.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        dict: Parsed markdown text, character count, and filename.
+    Useful for previewing parser output before uploading.
     """
     await require_vault_member(vault_id, current_user, db)
 

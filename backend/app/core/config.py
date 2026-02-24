@@ -117,7 +117,23 @@ class Settings(BaseSettings):
     WORKER_INGESTION_BATCH_SIZE: int = 20
     WORKER_INGESTION_BATCH_TIMEOUT_S: float = 2.0
     WORKER_INGESTION_CONCURRENCY: int = 5
-    
+
+    # External API timeouts
+    API_TIMEOUT_S: float = 30.0
+
+    # WebSocket
+    WS_HEARTBEAT_INTERVAL_S: float = 30.0
+    MAX_CONCURRENT_TRANSCRIPTION_SESSIONS: int = 3
+
+    # Pagination
+    PAGINATION_DEFAULT_LIMIT: int = 50
+    PAGINATION_MAX_LIMIT: int = 200
+
+    # Audio validation
+    TRANSCRIPTION_MAX_AUDIO_SIZE_MB: int = 100
+
+    # Sparse search
+    SPARSE_SEARCH_MAX_QUERY_LENGTH: int = 500
 
     @computed_field
     @property

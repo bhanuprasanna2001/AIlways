@@ -44,11 +44,7 @@ class LiveConnection(Protocol):
     """
 
     async def send_audio(self, audio_chunk: bytes) -> None:
-        """Send an audio chunk to the live transcription stream.
-
-        Args:
-            audio_chunk: Raw audio bytes.
-        """
+        """Send an audio chunk to the live transcription stream."""
         ...
 
     async def receive(self) -> TranscriptSegment | None:

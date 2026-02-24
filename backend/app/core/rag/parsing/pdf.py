@@ -53,13 +53,6 @@ class PdfParser:
     async def parse(self, file_content: bytes, filename: str) -> str:
         """Parse a PDF from raw bytes into markdown.
 
-        Args:
-            file_content: Raw PDF bytes.
-            filename: Original filename for logging.
-
-        Returns:
-            str: Extracted text formatted as markdown.
-
         Raises:
             ValueError: If the PDF cannot be opened or has no content.
         """
@@ -71,13 +64,6 @@ class PdfParser:
 
     def _parse_sync(self, file_content: bytes, filename: str) -> str:
         """Synchronous PDF parsing — executed in a thread pool.
-
-        Args:
-            file_content: Raw PDF bytes.
-            filename: Original filename for logging.
-
-        Returns:
-            str: Markdown text.
 
         Raises:
             ValueError: If the PDF cannot be opened or has no content.

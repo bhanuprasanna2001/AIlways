@@ -10,11 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.rag.retrieval.base import SearchResult
 from app.core.rag.retrieval.dense import _parse_vector
+from app.core.utils import normalize_numbers
+from app.core.config import get_settings
 from app.core.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-_MAX_QUERY_LENGTH = 500
+SETTINGS = get_settings()
 
 
 async def sparse_search(
@@ -88,25 +90,9 @@ async def sparse_search(
 # ---------------------------------------------------------------------------
 
 def _sanitize_query(query: str) -> str:
-    """Sanitize a query string for BM25 search.
-
-    Removes special characters that could break the ParadeDB query
-    parser, limits length, and collapses whitespace.
-
-    Number normalization: Thousand-separator commas are collapsed
-    **before** general sanitisation so that ``10,248`` becomes the
-    single token ``10248`` (matching how numbers appear in documents)
-    rather than two tokens ``10`` and ``248``.
-
-    Args:
-        query: Raw user query.
-
-    Returns:
-        str: Cleaned query string, or empty if invalid.
-    """
-    cleaned = query.strip()[:_MAX_QUERY_LENGTH]
-    # Collapse thousand-separator commas: 10,248 → 10248
-    cleaned = re.sub(r"(\d),(\d)", r"\1\2", cleaned)
+    """Sanitize a query string for BM25 search."""
+    cleaned = query.strip()[:SETTINGS.SPARSE_SEARCH_MAX_QUERY_LENGTH]
+    cleaned = normalize_numbers(cleaned)
     cleaned = re.sub(r"[^\w\s\-.$#@/]", " ", cleaned, flags=re.UNICODE)
     cleaned = " ".join(cleaned.split())
     return cleaned

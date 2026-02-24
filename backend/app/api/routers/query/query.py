@@ -29,15 +29,6 @@ async def query_vault(
     """Query documents in a vault and receive a grounded, cited answer.
 
     Pipeline: embed → hybrid search (dense + BM25 + RRF + MMR) → generate.
-
-    Args:
-        vault_id: The vault to query.
-        body: Query request with query text and top_k.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        QueryResponse: The answer with citations, confidence, and metadata.
     """
     await require_vault_member(vault_id, current_user, db)
 

@@ -29,13 +29,13 @@ from __future__ import annotations
 
 from uuid import UUID
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 
 from sqlmodel import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Document, Chunk
 from app.db.models.utils import touch_vault_updated_at
+from app.core.utils import utcnow
 from app.core.rag.parsing import get_parser
 from app.core.rag.chunking import get_chunker
 from app.core.rag.chunking.base import ChunkData
@@ -332,10 +332,6 @@ async def batch_embed_and_store(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _now() -> datetime:
-    """UTC now without timezone info (matches DB column type)."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
-
 
 async def _get_doc(db: AsyncSession, doc_id: UUID) -> Document:
     """Fetch a Document by ID. Raises if not found."""
@@ -363,6 +359,6 @@ async def _set_status(
     doc = await _get_doc(db, doc_id)
     doc.status = status
     doc.error_message = error_message
-    doc.updated_at = _now()
+    doc.updated_at = utcnow()
     db.add(doc)
     await db.flush()

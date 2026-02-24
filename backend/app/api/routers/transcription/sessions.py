@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json as json_mod
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -15,6 +14,7 @@ from app.db.models.transcription_session import TranscriptionSession
 from app.db.models.transcription_segment import TranscriptionSegment
 from app.db.models.transcription_claim import TranscriptionClaim
 from app.core.auth.deps import get_current_user, require_csrf
+from app.core.utils import safe_json_loads
 from app.core.logger import setup_logger
 from app.db.models.utils import _utcnow_naive
 
@@ -39,18 +39,7 @@ async def list_sessions(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[SessionListResponse]:
-    """List all transcription sessions owned by the current user.
-
-    Returns sessions in reverse chronological order (newest first).
-    Soft-deleted sessions are excluded.
-
-    Args:
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        list[SessionListResponse]: Summary list of sessions.
-    """
+    """List all transcription sessions for the current user (newest first)."""
     result = await db.execute(
         select(TranscriptionSession, Vault.name)
         .join(Vault, Vault.id == TranscriptionSession.vault_id)
@@ -86,16 +75,7 @@ async def get_session(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> SessionDetailResponse:
-    """Get full details for a transcription session including segments and claims.
-
-    Args:
-        session_id: The session identifier.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        SessionDetailResponse: Full session with segments and claims.
-    """
+    """Get full session detail including segments and claims."""
     result = await db.execute(
         select(TranscriptionSession, Vault.name)
         .join(Vault, Vault.id == TranscriptionSession.vault_id)
@@ -165,7 +145,7 @@ async def get_session(
                 verdict=c.verdict,
                 confidence=c.confidence,
                 explanation=c.explanation,
-                evidence=json_mod.loads(c.evidence_json) if c.evidence_json else [],
+                evidence=safe_json_loads(c.evidence_json),
             )
             for c in claims
         ],
@@ -183,17 +163,7 @@ async def update_session(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> SessionListResponse:
-    """Rename a transcription session.
-
-    Args:
-        session_id: The session identifier.
-        body: Request body with the new title.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        SessionListResponse: Updated session summary.
-    """
+    """Rename a transcription session."""
     result = await db.execute(
         select(TranscriptionSession, Vault.name)
         .join(Vault, Vault.id == TranscriptionSession.vault_id)
@@ -241,13 +211,7 @@ async def delete_session(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    """Soft-delete a transcription session.
-
-    Args:
-        session_id: The session identifier.
-        current_user: The authenticated user.
-        db: The database session.
-    """
+    """Soft-delete a transcription session."""
     result = await db.execute(
         select(TranscriptionSession).where(
             TranscriptionSession.id == session_id,

@@ -174,12 +174,6 @@ class GroqClaimDetector:
 
         Retries on transient failures (rate limits, timeouts, server errors).
         Returns None on permanent failure.
-
-        Args:
-            user_content: The user message for the chat completion.
-
-        Returns:
-            str | None: Raw JSON response, or None on failure.
         """
         max_retries = SETTINGS.CLAIM_GROQ_MAX_RETRIES
         delay = 1.0
@@ -223,18 +217,8 @@ def _filter_segments(
 ) -> list[TranscriptSegment]:
     """Pre-filter segments to remove noise before sending to the LLM.
 
-    Removes segments that are:
-      - Ultra-short (fewer than ``CLAIM_SEGMENT_MIN_WORDS`` words).
-      - Low confidence (below ``CLAIM_SEGMENT_MIN_CONFIDENCE``).
-
-    This reduces Groq token waste and prevents false claims from
-    misheard fragments like "Uh", "Yeah", or profanity fragments.
-
-    Args:
-        segments: Raw segments from the transcription.
-
-    Returns:
-        list[TranscriptSegment]: Filtered segments worth checking.
+    Removes ultra-short (fewer than ``CLAIM_SEGMENT_MIN_WORDS`` words)
+    and low-confidence (below ``CLAIM_SEGMENT_MIN_CONFIDENCE``) segments.
     """
     filtered: list[TranscriptSegment] = []
     for seg in segments:
@@ -248,14 +232,7 @@ def _filter_segments(
 
 
 def _format_transcript(segments: list[TranscriptSegment]) -> str:
-    """Format transcript segments into a readable speaker-attributed text.
-
-    Args:
-        segments: Speaker-diarized transcript segments.
-
-    Returns:
-        str: Formatted transcript text.
-    """
+    """Format transcript segments into readable speaker-attributed text."""
     lines: list[str] = []
     for seg in segments:
         timestamp = f"[{seg.start:.1f}s - {seg.end:.1f}s]"
@@ -317,18 +294,10 @@ def _parse_claims(
 def _find_segment_timing(
     claim_text: str, speaker: int, segments: list[TranscriptSegment],
 ) -> tuple[float, float]:
-    """Find the best matching segment's timing for a claim.
+    """Find the best matching segment's (start, end) timing for a claim.
 
     Prioritises segments from the same speaker, falling back to
     any segment containing relevant text.
-
-    Args:
-        claim_text: The claim text to match.
-        speaker: The speaker who made the claim.
-        segments: All transcript segments.
-
-    Returns:
-        tuple[float, float]: (start, end) timestamps in seconds.
     """
     claim_words = set(claim_text.lower().split())
 

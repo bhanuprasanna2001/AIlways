@@ -14,15 +14,7 @@ class TextParser:
     """
 
     async def parse(self, file_content: bytes, filename: str) -> str:
-        """Decode text/markdown bytes to a string.
-
-        Args:
-            file_content: Raw file bytes.
-            filename: Original filename for logging.
-
-        Returns:
-            str: Decoded text content.
-        """
+        """Decode text/markdown bytes to a UTF-8 string with normalised line endings."""
         text = file_content.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
         logger.debug(f"Parsed text file '{filename}': {len(text)} chars")
         return text

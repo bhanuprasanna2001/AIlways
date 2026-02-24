@@ -23,14 +23,7 @@ _limiter = Limiter(_rate)
 
 
 def cookie_opts(http_only: bool = True):
-    """Helper function to generate cookie options.
-
-    Args:
-        http_only (bool, optional): Whether the cookie should be HTTP-only. Defaults to True.
-
-    Returns:
-        dict: A dictionary of cookie options.
-    """
+    """Build standard cookie options dict for session/CSRF cookies."""
     return dict(
         httponly=http_only,
         secure=SETTINGS.COOKIE_SECURE,
@@ -93,18 +86,7 @@ class UpdateMeIn(BaseModel):
 
 @router.post("/register", dependencies=[Depends(RateLimiter(limiter=_limiter))], summary="Register a new user")
 async def register(user_in: RegisterIn, db: AsyncSession = Depends(get_db)):
-    """Register a new user.
-
-    Args:
-        user_in (RegisterIn): The user registration data.
-        db (AsyncSession, optional): The database session. Defaults to Depends(get_db).
-
-    Raises:
-        HTTPException: If the email is already registered.
-
-    Returns:
-        dict: A success message.
-    """
+    """Register a new user. Raises 400 if the email is already taken."""
     # Check if email is already registered
     email = user_in.email.lower()
     existing_user = await db.execute(
@@ -127,19 +109,7 @@ async def register(user_in: RegisterIn, db: AsyncSession = Depends(get_db)):
 
 @router.post("/login", dependencies=[Depends(RateLimiter(limiter=_limiter))], summary="Login a user")
 async def login(user_in: LoginIn, response: Response, db: AsyncSession = Depends(get_db)):
-    """Login a user.
-
-    Args:
-        user_in (LoginIn): The user login data.
-        response (Response): The FastAPI response object.
-        db (AsyncSession, optional): The database session. Defaults to Depends(get_db).
-
-    Raises:
-        HTTPException: If the email or password is invalid.
-
-    Returns:
-        dict: A success message.
-    """
+    """Authenticate a user and set session + CSRF cookies."""
     # Find user by email
     result = await db.execute(
         select(User).where(User.email == user_in.email.lower())
@@ -171,16 +141,7 @@ async def login(user_in: LoginIn, response: Response, db: AsyncSession = Depends
 
 @router.post("/logout", dependencies=[Depends(require_csrf)], summary="Logout the current user")
 async def logout(request: Request, response: Response, current_user: User = Depends(get_current_user)):
-    """Logout the current user.
-
-    Args:
-        request (Request): The FastAPI request object.
-        response (Response): The FastAPI response object.
-        current_user (User, optional): The currently authenticated user. Defaults to Depends(get_current_user).
-
-    Returns:
-        dict: A success message.
-    """
+    """Logout the current user and clear session cookies."""
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
     if session_id:
         await delete_session(session_id)
@@ -194,14 +155,7 @@ async def logout(request: Request, response: Response, current_user: User = Depe
 
 @router.get("/me", summary="Get the current authenticated user's information")
 async def get_me(current_user: User = Depends(get_current_user)):
-    """Get the current authenticated user's information.
-
-    Args:
-        current_user (User, optional): The currently authenticated user. Defaults to Depends(get_current_user).
-
-    Returns:
-        dict: The current user's information.
-    """
+    """Return the current authenticated user's profile."""
     return {
         "id": str(current_user.id),
         "name": current_user.name,
@@ -215,16 +169,7 @@ async def update_me(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update the current user's profile.
-
-    Args:
-        body (UpdateMeIn): The fields to update.
-        current_user (User): The currently authenticated user.
-        db (AsyncSession): The database session.
-
-    Returns:
-        dict: The updated user information.
-    """
+    """Update the current user's profile."""
     if body.name is not None:
         current_user.name = body.name
         db.add(current_user)
@@ -252,12 +197,6 @@ async def issue_ws_ticket(
     all environments, so this endpoint issues a random ticket that the
     client passes as a query parameter.  The ticket is consumed
     atomically on first use and cannot be replayed.
-
-    Args:
-        current_user: The authenticated user (validated via session cookie).
-
-    Returns:
-        dict: ``{"ticket": "<random-hex>"}``
     """
     ticket = secrets.token_hex(32)
     await store_ws_ticket(ticket, str(current_user.id))

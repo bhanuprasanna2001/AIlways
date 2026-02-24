@@ -8,7 +8,6 @@ from app.db import engine
 from app.core.config import get_settings
 from app.core.logger import setup_logger
 from app.core.kafka.producer import KafkaProducer, KafkaProducerError
-
 from app.core.tools.redis import init_redis_client
 
 logger = setup_logger(__name__)
@@ -16,27 +15,43 @@ logger = setup_logger(__name__)
 
 @retry(stop=stop_after_attempt(5), wait=wait_fixed(2))
 async def check_redis_connection() -> None:
-    """Check the connection to Redis by initializing the client.
-    
-    Args:
-        None
-
-    Returns:
-        None
-    """
+    """Check the connection to Redis by initializing the client."""
     await init_redis_client()
+
+
+async def _cleanup_stale_sessions() -> None:
+    """Mark sessions stuck in 'recording' as 'failed' — crash recovery."""
+    from datetime import timedelta
+    from sqlmodel import select
+    from app.db import get_db_session
+    from app.db.models.transcription_session import TranscriptionSession
+    from app.core.utils import utcnow
+
+    settings = get_settings()
+    cutoff = utcnow() - timedelta(minutes=settings.TRANSCRIPTION_SESSION_STALE_TIMEOUT_MINUTES)
+
+    async with get_db_session() as db:
+        result = await db.execute(
+            select(TranscriptionSession).where(
+                TranscriptionSession.status == "recording",
+                TranscriptionSession.started_at < cutoff,
+            )
+        )
+        stale = result.scalars().all()
+        if not stale:
+            return
+
+        now = utcnow()
+        for session in stale:
+            session.status = "failed"
+            session.ended_at = now
+        await db.commit()
+        logger.info(f"Cleaned up {len(stale)} stale transcription session(s)")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Lifespan context manager for the FastAPI application to handle startup and shutdown events.
-
-    Args:
-        app (FastAPI): The FastAPI application instance.
-
-    Returns:
-        AsyncGenerator[None, None]: An asynchronous generator for the lifespan context.
-    """
+    """Application lifespan — startup and shutdown."""
     settings = get_settings()
     logger.info(f"Starting application in {settings.ENV}")
 
@@ -45,6 +60,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     app.state.db_engine = engine
     logger.info("Database engine initialized")
+
+    # Recover sessions stuck in 'recording' from a previous crash
+    try:
+        await _cleanup_stale_sessions()
+    except Exception as e:
+        logger.warning(f"Stale session cleanup failed: {e}")
 
     app.state.kafka_producer = None
     if settings.KAFKA_ENABLED:

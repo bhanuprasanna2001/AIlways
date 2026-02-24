@@ -20,15 +20,7 @@ class Chunker(Protocol):
     """
 
     def chunk(self, text: str, filename: str) -> list[ChunkData]:
-        """Split text into chunks with contextual headers.
-
-        Args:
-            text: Parsed markdown text from the parser.
-            filename: Original filename for source labelling.
-
-        Returns:
-            list[ChunkData]: Ordered list of chunks.
-        """
+        """Split parsed markdown into chunks with contextual source headers."""
         ...
 
 
