@@ -10,6 +10,8 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import text as sa_text
+
 from app.core.claims.base import Claim, ClaimVerdict, Evidence
 from app.core.claims.exceptions import ClaimVerificationError
 from app.core.rag.embedding import get_embedder
@@ -26,7 +28,7 @@ SETTINGS = get_settings()
 # Verification prompt
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """You are a fact-checking assistant. Your job is to verify whether a claim is supported or contradicted by the provided document evidence.
+_SYSTEM_PROMPT = """You are a fact-checking assistant. Your job is to verify whether a claim is supported or contradicted by the provided document evidence. You also handle data lookup claims — claims that ask for a specific piece of data without asserting a value.
 
 Analyze the claim against the context and determine:
 1. Is the claim SUPPORTED by the evidence? (Evidence confirms it)
@@ -40,8 +42,8 @@ CRITICAL RULES — read carefully:
 - Do NOT assume that absence from this context means absence from the vault.
 
 Verdict guidelines:
-- SUPPORTED: The context contains a document about the SAME specific entity (same invoice number, same order, same product) AND the facts match the claim.
-- CONTRADICTED: The context contains a document about the SAME specific entity AND the facts DIFFER from what the claim states. For example, if the claim says "invoice 10248 total is $440" and the context contains invoice 10248 showing a total of $500, that is CONTRADICTED.
+- SUPPORTED: The context contains a document about the SAME specific entity (same invoice number, same order, same product) AND the facts either match the claim or answer the data lookup. For data lookup claims (e.g. "the total price of invoice 10248" without an asserted value): if the context contains the relevant document and the requested data, return SUPPORTED with the actual data in the explanation and evidence quote.
+- CONTRADICTED: The context contains a document about the SAME specific entity AND the facts DIFFER from what the claim states. For example, if the claim says "invoice 10248 total is $440" and the context contains invoice 10248 showing a total of $500, that is CONTRADICTED. Data lookup claims (without an asserted value) can NEVER be contradicted — they are either SUPPORTED (data found) or UNVERIFIABLE (data not found).
 - UNVERIFIABLE: The context does NOT contain the specific entity mentioned in the claim, OR the context does not address the specific fact being claimed. If you find invoices 10253, 10259, etc. but the claim is about invoice 10248, that is UNVERIFIABLE because the RIGHT document was not retrieved — it does NOT mean the claim is wrong.
 
 Common mistake to avoid: Finding OTHER entities (different invoice numbers, different orders) and concluding the claim is contradicted. Different entities are irrelevant — they neither support nor contradict a claim about a specific entity.
@@ -50,13 +52,13 @@ Respond ONLY with valid JSON matching this schema:
 {
     "verdict": "supported" | "contradicted" | "unverifiable",
     "confidence": 0.0,
-    "explanation": "Clear explanation of why this verdict was reached",
+    "explanation": "Clear explanation of why this verdict was reached. For data lookups, include the actual data found (e.g. 'The total price of invoice 10248 is $440.00').",
     "evidence": [
         {
             "doc_title": "Document title",
             "section": "Section heading or null",
             "page": 1,
-            "quote": "Exact quote from the context",
+            "quote": "Exact quote from the context containing the relevant data",
             "relevance_score": 0.9
         }
     ]
@@ -153,11 +155,26 @@ class RAGClaimVerifier:
                 id_boost = " ".join(f"Order ID {eid}" for eid in entity_ids[:3])
                 search_text = f"{id_boost} {search_text}"
 
-            # 1. Embed the enriched search text
+            # 1. Exact-ID pre-filter: if the claim references specific
+            #    entity IDs (invoice/order numbers), do a direct SQL
+            #    lookup first. Dense search fails when 800+ invoices
+            #    share near-identical embeddings.
+            exact_results: list[SearchResult] = []
+            if entity_ids:
+                exact_results = await self._exact_id_search(
+                    entity_ids, vault_id, db,
+                )
+                if exact_results:
+                    logger.info(
+                        f"Exact-ID pre-filter found {len(exact_results)} "
+                        f"chunks for IDs {entity_ids[:3]}"
+                    )
+
+            # 2. Embed the enriched search text
             embedder = get_embedder()
             claim_embedding = await embedder.embed_query(search_text)
 
-            # 2. Hybrid search for relevant evidence
+            # 3. Hybrid search for relevant evidence
             #    mmr_lambda=1.0 → pure relevance ranking (no diversity).
             #    For verification we need the EXACT document, not a
             #    diverse sample across invoices.
@@ -169,6 +186,15 @@ class RAGClaimVerifier:
                 top_k=self._top_k,
                 mmr_lambda=SETTINGS.CLAIM_VERIFICATION_MMR_LAMBDA,
             )
+
+            # Merge: exact-ID hits first, then hybrid (deduplicated)
+            if exact_results:
+                seen_ids = {r.chunk_id for r in exact_results}
+                merged = list(exact_results)
+                for r in results:
+                    if r.chunk_id not in seen_ids:
+                        merged.append(r)
+                results = merged[:self._top_k + len(exact_results)]
 
             if not results:
                 logger.info(f"No evidence found for claim: {claim.text[:50]}...")
@@ -192,6 +218,62 @@ class RAGClaimVerifier:
                 confidence=0.0,
                 explanation=f"Verification failed: {e}",
             )
+
+    async def _exact_id_search(
+        self,
+        entity_ids: list[str],
+        vault_id: UUID,
+        db: AsyncSession,
+    ) -> list[SearchResult]:
+        """Retrieve chunks whose content contains one of the entity IDs.
+
+        This bypasses embedding-based search entirely and does a direct
+        SQL ILIKE lookup.  It is critical for corpora of near-identical
+        documents (e.g. 800+ invoices with the same template) where
+        cosine similarity cannot distinguish the correct document.
+        """
+        try:
+            # Build OR conditions for each entity ID
+            conditions = " OR ".join(
+                f"content_with_header ILIKE :id_{i}"
+                for i in range(len(entity_ids[:3]))
+            )
+            params: dict = {"vault_id": vault_id}
+            for i, eid in enumerate(entity_ids[:3]):
+                params[f"id_{i}"] = f"%{eid}%"
+
+            query = sa_text(f"""
+                SELECT id, doc_id, content, content_with_header,
+                       chunk_index, section_heading, page_number
+                FROM chunks
+                WHERE vault_id = :vault_id
+                  AND is_deleted = false
+                  AND ({conditions})
+                ORDER BY chunk_index
+                LIMIT 10
+            """)
+
+            result = await db.execute(query, params)
+            rows = result.fetchall()
+
+            return [
+                SearchResult(
+                    chunk_id=row.id,
+                    doc_id=row.doc_id,
+                    content=row.content_with_header,
+                    score=1.0,  # Exact match — highest confidence
+                    metadata={
+                        "chunk_index": row.chunk_index,
+                        "section_heading": row.section_heading,
+                        "page_number": row.page_number,
+                        "source": "exact_id",
+                    },
+                )
+                for row in rows
+            ]
+        except Exception as exc:
+            logger.warning(f"Exact-ID search failed: {exc}")
+            return []
 
     async def _verify_against_context(
         self, claim: Claim, results: list[SearchResult],

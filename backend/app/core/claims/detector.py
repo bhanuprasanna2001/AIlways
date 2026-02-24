@@ -23,7 +23,7 @@ SETTINGS = get_settings()
 # Prompt
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """You are a claim detector for a real-time meeting transcription system. Your job is to extract verifiable factual claims from conversation transcripts.
+_SYSTEM_PROMPT = """You are a claim detector for a real-time meeting transcription system. Your job is to extract verifiable factual claims AND data lookup requests from conversation transcripts.
 
 A "claim" is a factual assertion that can be checked against documents. This includes:
 - Specific numbers, amounts, prices, quantities
@@ -33,12 +33,21 @@ A "claim" is a factual assertion that can be checked against documents. This inc
 - Status claims ("the order was shipped", "the payment was received")
 - Contractual or policy claims ("the terms state X", "our policy is Y")
 
+A "lookup request" is a question or request for specific data tied to a named entity. This includes:
+- "What's the total price of invoice 10248?" → extract as: "the total price of invoice 10248"
+- "How many items are in order 10248?" → extract as: "the number of items in order 10248"
+- "I want to know the total price of invoice 10248" → extract as: "the total price of invoice 10248"
+- "Can you check the shipping date for order 5021?" → extract as: "the shipping date of order 5021"
+
+For lookup requests: Convert the question/request into a neutral declarative phrase (WITHOUT inventing a value). The verification system will retrieve the actual data from documents and include it in the evidence.
+
 Do NOT extract:
 - Opinions or subjective statements
-- Questions (unless they contain an embedded factual assertion, e.g. "Isn't the total price $440?" contains the assertion "the total price is $440")
+- Generic questions without a specific entity reference (e.g. "how does this work?")
 - Future predictions or speculation
 - Generic greetings or filler speech
 - Statements that are clearly hypothetical
+- Personal biographical claims (names, education, employment) that would never appear in business documents
 
 CRITICAL RULES:
 1. Each claim MUST be self-contained. Always include the full entity reference.
@@ -48,20 +57,21 @@ CRITICAL RULES:
 3. If an entity reference cannot be resolved from context, include whatever identifying information is available.
 4. Extract claims ONLY from the NEW TRANSCRIPT section. The prior context is for reference resolution only.
 5. Normalize ALL numbers: remove thousand separators. Write "10248" not "10,248". Write "$1500" not "$1,500". This is critical because documents store numbers without commas.
-6. Only extract claims that can be verified against BUSINESS DOCUMENTS (invoices, purchase orders, shipping records, inventory reports, contracts). Do NOT extract personal biographical claims (names, education, employment) that would never appear in business documents.
+6. Only extract claims that can be verified against BUSINESS DOCUMENTS (invoices, purchase orders, shipping records, inventory reports, contracts).
+7. When someone asks a question or expresses intent to look up document data (e.g. "what's the total price", "I want to know the shipping date"), ALWAYS extract it as a lookup claim if a specific entity is referenced.
 
 Respond ONLY with valid JSON matching this schema:
 {
     "claims": [
         {
-            "text": "Self-contained factual claim with full entity references",
+            "text": "Self-contained factual claim or lookup phrase with full entity references",
             "speaker": 0,
             "context": "Brief surrounding context including entity references"
         }
     ]
 }
 
-If no verifiable claims are found, return: {"claims": []}"""
+If no verifiable claims or lookup requests are found, return: {"claims": []}"""
 
 _USER_TEMPLATE_WITH_CONTEXT = """{entity_section}PRIOR CONTEXT (for reference resolution only — do NOT extract claims from this):
 {context}

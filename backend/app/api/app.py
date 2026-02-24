@@ -8,6 +8,7 @@ from app.api.routers.vault.vault import router as vault_router
 from app.api.routers.documents.documents import router as documents_router
 from app.api.routers.query.query import router as query_router
 from app.api.routers.transcription.transcription import router as transcription_router
+from app.api.routers.transcription.sessions import router as sessions_router
 
 from app.api.lifespan import lifespan
 from app.core.config import Settings, get_settings
@@ -82,6 +83,7 @@ def register_routers(app: FastAPI) -> FastAPI:
     app.include_router(documents_router)
     app.include_router(query_router)
     app.include_router(transcription_router)
+    app.include_router(sessions_router)
     return app
 
 

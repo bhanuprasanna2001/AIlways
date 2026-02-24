@@ -66,6 +66,8 @@ class Settings(BaseSettings):
     DEEPGRAM_API_KEY: str = ""
     DEEPGRAM_MODEL: str = "nova-3"
     DEEPGRAM_LANGUAGE: str = "en"
+    DEEPGRAM_UTTERANCE_END_MS: int = 1000
+    DEEPGRAM_DIARIZE: bool = True
 
     # Groq (fast LLM for claim detection)
     GROQ_API_KEY: str = ""
@@ -85,10 +87,11 @@ class Settings(BaseSettings):
     CLAIM_SEGMENT_MIN_WORDS: int = 3
     CLAIM_SEGMENT_MIN_CONFIDENCE: float = 0.5
     CLAIM_GROQ_MAX_RETRIES: int = 3
-    CLAIM_DRAIN_TIMEOUT_S: float = 2.0
+    CLAIM_DRAIN_TIMEOUT_S: float = 3.0
     CLAIM_TASK_TIMEOUT_S: float = 15.0
     CLAIM_MAX_CONCURRENT_TASKS: int = 5
     CLAIM_VERIFICATION_MMR_LAMBDA: float = 1.0
+    CLAIM_EXTRACT_FROM_QUESTIONS: bool = True
 
     # File Storage
     FILE_STORE_PATH: str = "./data/uploads"
@@ -111,6 +114,14 @@ class Settings(BaseSettings):
     KAFKA_PRODUCER_TIMEOUT_MS: int = 10000
     KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS: int = 600000
     KAFKA_RECOVERY_INTERVAL_MINUTES: int = 5
+
+    # Transcription Sessions
+    TRANSCRIPTION_SESSION_STALE_TIMEOUT_MINUTES: int = 30
+    TRANSCRIPTION_DB_FLUSH_INTERVAL_S: float = 2.0
+    TRANSCRIPTION_DB_FLUSH_BATCH_SIZE: int = 50
+    TRANSCRIPTION_MAX_SESSION_DURATION_S: int = 14400
+    TRANSCRIPTION_SESSION_TITLE_MAX_LENGTH: int = 255
+    TRANSCRIPTION_WS_TICKET_TTL_S: int = 60
 
     # Worker tuning
     WORKER_INGESTION_BATCH_SIZE: int = 20

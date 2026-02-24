@@ -46,8 +46,10 @@ async def hybrid_search(
     Returns:
         list[SearchResult]: High-quality results.
     """
-    # Fetch more candidates than needed for RRF + MMR to operate on
-    fetch_k = max(top_k * 4, 20)
+    # Fetch more candidates than needed for RRF + MMR to operate on.
+    # Use a generous multiplier — with 800+ near-identical invoice docs
+    # the correct document may rank outside the top 20 with dense alone.
+    fetch_k = max(top_k * 6, 40)
 
     dense_results = await dense_search(query_embedding, vault_id, db, top_k=fetch_k)
     sparse_results = await sparse_search(query_text, vault_id, db, top_k=fetch_k)

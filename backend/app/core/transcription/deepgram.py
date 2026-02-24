@@ -14,9 +14,11 @@ from app.core.transcription.base import (
     TranscriptWord,
 )
 from app.core.transcription.exceptions import TranscriptionError
+from app.core.config import get_settings
 from app.core.logger import setup_logger
 
 logger = setup_logger(__name__)
+SETTINGS = get_settings()
 
 
 class DeepgramTranscriber:
@@ -238,13 +240,13 @@ class DeepgramTranscriber:
                 model=self._model,
                 language=self._language,
                 smart_format="true",
-                diarize="true",
+                diarize=str(SETTINGS.DEEPGRAM_DIARIZE).lower(),
                 punctuate="true",
                 encoding=encoding,
                 sample_rate=str(sample_rate),
                 channels=str(channels),
                 interim_results="true",
-                utterance_end_ms="1000",
+                utterance_end_ms=str(SETTINGS.DEEPGRAM_UTTERANCE_END_MS),
             ) as ws:
                 logger.info("DeepGram live connection started")
                 yield DeepgramLiveConnection(ws)

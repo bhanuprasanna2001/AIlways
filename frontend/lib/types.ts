@@ -78,3 +78,57 @@ export type Conversation = {
   created_at: string;
   updated_at: string;
 };
+
+// ---------------------------------------------------------------------------
+// Transcription types — mirrors backend transcription schemas
+// ---------------------------------------------------------------------------
+
+export type TranscriptionSessionStatus = "recording" | "completed" | "failed";
+
+export type TranscriptionSession = {
+  id: string;
+  vault_id: string;
+  vault_name: string;
+  title: string;
+  status: TranscriptionSessionStatus;
+  duration_seconds: number | null;
+  speaker_count: number;
+  segment_count: number;
+  claim_count: number;
+  started_at: string;
+  ended_at: string | null;
+};
+
+export type TranscriptionSegment = {
+  id: string;
+  text: string;
+  speaker: number;
+  start: number;
+  end: number;
+  confidence: number;
+  segment_index: number;
+};
+
+export type TranscriptionClaimVerdict =
+  | "pending"
+  | "supported"
+  | "contradicted"
+  | "unverifiable";
+
+export type TranscriptionClaim = {
+  id: string;
+  text: string;
+  speaker: number;
+  timestamp_start: number;
+  timestamp_end: number;
+  context: string;
+  verdict: TranscriptionClaimVerdict;
+  confidence: number;
+  explanation: string | null;
+  evidence: Citation[];
+};
+
+export type TranscriptionSessionDetail = TranscriptionSession & {
+  segments: TranscriptionSegment[];
+  claims: TranscriptionClaim[];
+};

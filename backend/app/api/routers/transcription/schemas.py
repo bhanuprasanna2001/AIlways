@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from typing import Literal
+from uuid import UUID
+from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.core.claims.base import Evidence
 
 
 # ---------------------------------------------------------------------------
-# Response schemas
+# Response schemas — pre-recorded transcription
 # ---------------------------------------------------------------------------
 
 class TranscriptSegmentResponse(BaseModel):
@@ -58,6 +60,87 @@ class TranscriptionResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Response schemas — transcription sessions (history)
+# ---------------------------------------------------------------------------
+
+class SessionListResponse(BaseModel):
+    """Summary of a transcription session for list views."""
+
+    id: UUID
+    vault_id: UUID
+    vault_name: str
+    title: str
+    status: str
+    duration_seconds: float | None
+    speaker_count: int
+    segment_count: int
+    claim_count: int
+    started_at: datetime
+    ended_at: datetime | None
+
+
+class SessionSegmentResponse(BaseModel):
+    """A persisted transcript segment belonging to a session."""
+
+    id: UUID
+    text: str
+    speaker: int
+    start: float
+    end: float
+    confidence: float
+    segment_index: int
+
+
+class SessionClaimResponse(BaseModel):
+    """A persisted claim with its verification verdict."""
+
+    id: UUID
+    text: str
+    speaker: int
+    timestamp_start: float
+    timestamp_end: float
+    context: str
+    verdict: str
+    confidence: float
+    explanation: str | None
+    evidence: list[Evidence] = []
+
+
+class SessionDetailResponse(BaseModel):
+    """Full transcription session with segments and claims."""
+
+    id: UUID
+    vault_id: UUID
+    vault_name: str
+    title: str
+    status: str
+    duration_seconds: float | None
+    speaker_count: int
+    segment_count: int
+    claim_count: int
+    started_at: datetime
+    ended_at: datetime | None
+    segments: list[SessionSegmentResponse]
+    claims: list[SessionClaimResponse]
+
+
+class SessionUpdateRequest(BaseModel):
+    """Request body for renaming a transcription session."""
+
+    title: str
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Session title cannot be empty")
+        if len(v) > 255:
+            raise ValueError("Session title must be at most 255 characters")
+        return v
+
+
+# ---------------------------------------------------------------------------
 # WebSocket message schemas (JSON)
 # ---------------------------------------------------------------------------
 
@@ -93,6 +176,21 @@ class WSClaimVerifiedMessage(BaseModel):
     confidence: float
     explanation: str
     evidence: list[Evidence] = []
+
+
+class WSSessionStartedMessage(BaseModel):
+    """WebSocket message: session has been created and recording started."""
+
+    type: Literal["session_started"] = "session_started"
+    session_id: str
+
+
+class WSSessionEndedMessage(BaseModel):
+    """WebSocket message: session has been finalized."""
+
+    type: Literal["session_ended"] = "session_ended"
+    session_id: str
+    duration_seconds: float
 
 
 class WSErrorMessage(BaseModel):

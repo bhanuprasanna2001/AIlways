@@ -73,3 +73,40 @@ async def delete_session(session_id: str) -> None:
     """
     redis_client = await get_redis_client()
     await redis_client.delete(session_id)
+
+
+async def store_ws_ticket(ticket: str, user_id: str) -> None:
+    """Store a one-time WebSocket ticket in Redis.
+
+    The ticket is consumed on first use — it cannot be replayed.
+    TTL is controlled by ``TRANSCRIPTION_WS_TICKET_TTL_S``.
+
+    Args:
+        ticket: The unique ticket string.
+        user_id: The user ID to associate with the ticket.
+
+    Returns:
+        None
+    """
+    client = await get_redis_client()
+    await client.setex(f"ws_ticket:{ticket}", SETTINGS.TRANSCRIPTION_WS_TICKET_TTL_S, user_id)
+
+
+async def consume_ws_ticket(ticket: str) -> Optional[str]:
+    """Consume a one-time WebSocket ticket from Redis.
+
+    Returns the associated user ID and deletes the ticket atomically
+    so it cannot be used again.
+
+    Args:
+        ticket: The ticket string to consume.
+
+    Returns:
+        Optional[str]: The user ID if the ticket was valid, None otherwise.
+    """
+    client = await get_redis_client()
+    pipe = client.pipeline()
+    pipe.get(f"ws_ticket:{ticket}")
+    pipe.delete(f"ws_ticket:{ticket}")
+    results = await pipe.execute()
+    return results[0]

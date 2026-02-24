@@ -9,6 +9,8 @@ import {
   Clock,
   Settings,
   X,
+  Mic,
+  ListMusic,
 } from "lucide-react";
 import { useSidebar } from "./sidebar-context";
 import { cn } from "@/lib/utils";
@@ -16,8 +18,10 @@ import { cn } from "@/lib/utils";
 const navItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
   { icon: MessageSquare, label: "Copilot", path: "/copilot" },
+  { icon: Mic, label: "Transcription", path: "/transcription" },
   { icon: FolderLock, label: "Vaults", path: "/vaults" },
   { icon: Clock, label: "History", path: "/history" },
+  { icon: ListMusic, label: "Sessions", path: "/sessions" },
   { icon: Settings, label: "Settings", path: "/settings" },
 ];
 

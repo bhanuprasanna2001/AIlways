@@ -10,7 +10,9 @@ import type { User } from "@/lib/types";
 const PAGE_TITLES: Record<string, string> = {
   "/dashboard": "Dashboard",
   "/copilot": "Copilot",
+  "/transcription": "Transcription",
   "/history": "History",
+  "/sessions": "Sessions",
   "/vaults": "Vaults",
   "/settings": "Settings",
 };

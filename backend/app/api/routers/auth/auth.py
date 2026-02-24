@@ -13,6 +13,7 @@ from app.core.config import get_settings
 from app.core.auth.security import hash_password, verify_password
 from app.core.tools.redis import store_session, get_session, delete_session
 from app.core.auth.deps import get_current_user, require_csrf, SESSION_COOKIE_NAME, CSRF_COOKIE_NAME
+from app.core.tools.redis import store_session, get_session, delete_session, store_ws_ticket
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -236,3 +237,29 @@ async def update_me(
         "name": current_user.name,
         "email": current_user.email,
     }
+
+
+@router.post(
+    "/ws-ticket",
+    dependencies=[Depends(require_csrf)],
+    summary="Issue a one-time WebSocket authentication ticket",
+)
+async def issue_ws_ticket(
+    current_user: User = Depends(get_current_user),
+):
+    """Create a short-lived, single-use ticket for WebSocket authentication.
+
+    The browser cannot send cookies on a ``new WebSocket()`` call in
+    all environments, so this endpoint issues a random ticket that the
+    client passes as a query parameter.  The ticket is consumed
+    atomically on first use and cannot be replayed.
+
+    Args:
+        current_user: The authenticated user (validated via session cookie).
+
+    Returns:
+        dict: ``{"ticket": "<random-hex>"}``
+    """
+    ticket = secrets.token_hex(32)
+    await store_ws_ticket(ticket, str(current_user.id))
+    return {"ticket": ticket}

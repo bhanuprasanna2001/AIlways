@@ -21,7 +21,9 @@ export const config = {
   matcher: [
     "/dashboard/:path*",
     "/copilot/:path*",
+    "/transcription/:path*",
     "/history/:path*",
+    "/sessions/:path*",
     "/vaults/:path*",
     "/settings/:path*",
   ],

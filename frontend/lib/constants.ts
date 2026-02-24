@@ -29,3 +29,33 @@ export const STATUS_VARIANT: Record<string, "success" | "warning" | "error" | "n
   pending_delete: "neutral",
   deleted: "neutral",
 };
+
+// ---------------------------------------------------------------------------
+// Transcription session constants
+// ---------------------------------------------------------------------------
+
+export const SESSION_STATUS_LABELS: Record<string, string> = {
+  recording: "Recording",
+  completed: "Completed",
+  failed: "Failed",
+};
+
+export const SESSION_STATUS_VARIANT: Record<string, "success" | "warning" | "error" | "neutral"> = {
+  recording: "warning",
+  completed: "success",
+  failed: "error",
+};
+
+export const VERDICT_LABELS: Record<string, string> = {
+  pending: "Verifying",
+  supported: "Supported",
+  contradicted: "Contradicted",
+  unverifiable: "Unverifiable",
+};
+
+export const VERDICT_VARIANT: Record<string, "success" | "warning" | "error" | "neutral"> = {
+  pending: "neutral",
+  supported: "success",
+  contradicted: "error",
+  unverifiable: "warning",
+};

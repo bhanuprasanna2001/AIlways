@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json as json_mod
 import re
 import time
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect, status
@@ -12,6 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db, get_db_session
 from app.db.models import User
+from app.db.models.transcription_session import TranscriptionSession
+from app.db.models.transcription_segment import TranscriptionSegment as TranscriptionSegmentModel
+from app.db.models.transcription_claim import TranscriptionClaim
 from app.core.auth.deps import get_current_user, require_vault_member
 from app.core.config import get_settings
 from app.core.transcription import get_transcriber
@@ -28,6 +33,8 @@ from app.api.routers.transcription.schemas import (
     WSTranscriptMessage,
     WSClaimDetectedMessage,
     WSClaimVerifiedMessage,
+    WSSessionStartedMessage,
+    WSSessionEndedMessage,
     WSErrorMessage,
 )
 
@@ -222,6 +229,22 @@ async def live_transcribe(
     await websocket.accept()
     logger.info(f"Live transcription started: vault={vault_id}, user={user.id}")
 
+    # Create persistent session — non-fatal if DB is unavailable
+    persistence = _SessionPersistence(vault_id=vault_id, user_id=user.id)
+    try:
+        await persistence.create_session()
+    except Exception as exc:
+        logger.error(f"Failed to create transcription session: {exc}")
+
+    # Notify client of session ID (may be None if creation failed)
+    try:
+        started_msg = WSSessionStartedMessage(
+            session_id=str(persistence.session_id) if persistence.session_id else "",
+        )
+        await websocket.send_json(started_msg.model_dump())
+    except Exception:
+        logger.error("Failed to send session_started message")
+
     # Session state
     buffer = _TranscriptBuffer(vault_id=vault_id)
     claim_tasks: set[asyncio.Task] = set()
@@ -233,6 +256,7 @@ async def live_transcribe(
     # Dynamic sample rate from client (browser AudioContext.sampleRate)
     sample_rate = int(websocket.query_params.get("sample_rate", "16000"))
 
+    session_failed = False
     try:
         async with transcriber.live_session(sample_rate=sample_rate) as live:
 
@@ -245,33 +269,56 @@ async def live_transcribe(
                 two DeepGram messages would be split into two batches).
                 Instead, the flush timer polls buffer state and fires
                 claims when the speaker goes idle or enough time passes.
+
+                CRITICAL: This loop does NOT check ``stop_event``.  It
+                runs until cancelled.  After the user sends ``stop``,
+                ``live.finalize()`` flushes remaining audio in DeepGram.
+                Those flushed transcripts MUST still be received here so
+                they can enter the buffer for the final claim pass.  The
+                drain timeout (``CLAIM_DRAIN_TIMEOUT_S``) eventually
+                cancels this task once DeepGram has finished.
                 """
-                while not stop_event.is_set():
-                    try:
-                        segment = await asyncio.wait_for(live.receive(), timeout=0.5)
-                    except asyncio.TimeoutError:
-                        continue
-                    except Exception:
-                        break
+                try:
+                    while True:
+                        try:
+                            segment = await asyncio.wait_for(live.receive(), timeout=0.5)
+                        except asyncio.TimeoutError:
+                            # No data within 0.5 s — if draining, the
+                            # outer wait_for will cancel us after the
+                            # drain timeout.
+                            continue
+                        except asyncio.CancelledError:
+                            return
+                        except Exception:
+                            break
 
-                    if segment is None:
-                        continue
+                        if segment is None:
+                            # None = non-transcript message or stream ended.
+                            # After finalize the stream closes and receive()
+                            # returns None in a tight loop.  Sleep briefly to
+                            # avoid CPU spin while waiting to be cancelled.
+                            if stop_event.is_set():
+                                await asyncio.sleep(0.05)
+                            continue
 
-                    buffer.add_segment(segment)
+                        buffer.add_segment(segment)
+                        persistence.buffer_segment(segment)
 
-                    msg = WSTranscriptMessage(
-                        text=segment.text,
-                        speaker=segment.speaker,
-                        start=segment.start,
-                        end=segment.end,
-                        confidence=segment.confidence,
-                        is_final=segment.is_final,
-                    )
-                    try:
-                        await websocket.send_json(msg.model_dump())
-                    except Exception:
-                        stop_event.set()
-                        return
+                        msg = WSTranscriptMessage(
+                            text=segment.text,
+                            speaker=segment.speaker,
+                            start=segment.start,
+                            end=segment.end,
+                            confidence=segment.confidence,
+                            is_final=segment.is_final,
+                        )
+                        try:
+                            await websocket.send_json(msg.model_dump())
+                        except Exception:
+                            stop_event.set()
+                            return
+                except asyncio.CancelledError:
+                    pass
 
             async def _flush_timer_loop() -> None:
                 """Sole trigger for claim detection — polls buffer state.
@@ -297,13 +344,27 @@ async def live_transcribe(
                         and buffer.should_trigger_claims()
                     ):
                         _spawn_claim_task(
-                            websocket, buffer, vault_id,
+                            websocket, buffer, persistence, vault_id,
                             claim_tasks, claim_semaphore,
                         )
+
+            async def _db_flush_loop() -> None:
+                """Periodically flush buffered segments to the database.
+
+                Runs independently of claim detection. Ensures segments
+                are persisted even during continuous speech without
+                waiting for the session to end.
+                """
+                while not stop_event.is_set():
+                    await asyncio.sleep(SETTINGS.TRANSCRIPTION_DB_FLUSH_INTERVAL_S)
+                    if stop_event.is_set():
+                        break
+                    await persistence.flush_segments()
 
             # Start background tasks
             receiver_task = asyncio.create_task(_receiver_loop())
             flush_timer_task = asyncio.create_task(_flush_timer_loop())
+            db_flush_task = asyncio.create_task(_db_flush_loop())
 
             # Audio forwarding loop (main loop)
             try:
@@ -314,7 +375,6 @@ async def live_transcribe(
                         await live.send_audio(data["bytes"])
                     elif "text" in data and data["text"]:
                         try:
-                            import json as json_mod
                             msg_data = json_mod.loads(data["text"])
                             if msg_data.get("type") == "stop":
                                 break
@@ -345,34 +405,75 @@ async def live_transcribe(
                     except asyncio.CancelledError:
                         pass
 
-                # 3. Stop the flush timer
+                # 3. Stop the flush timer and DB flush task
                 flush_timer_task.cancel()
-                try:
-                    await flush_timer_task
-                except asyncio.CancelledError:
-                    pass
+                db_flush_task.cancel()
+                for t in (flush_timer_task, db_flush_task):
+                    try:
+                        await t
+                    except asyncio.CancelledError:
+                        pass
 
-                # 4. Final claim pass on any remaining unchecked segments
+                # 4. Flush remaining segments to DB
+                await persistence.flush_segments()
+
+                # 5. Final claim pass on any remaining unchecked segments
                 if (
                     SETTINGS.CLAIM_DETECTION_ENABLED
                     and buffer.has_unchecked()
                 ):
                     _spawn_claim_task(
-                        websocket, buffer, vault_id,
+                        websocket, buffer, persistence, vault_id,
                         claim_tasks, claim_semaphore,
                     )
 
     except Exception as e:
+        session_failed = True
         logger.error(f"Failed to start live transcription: {e}")
+        await persistence.fail_session()
         try:
             msg = WSErrorMessage(message=f"Failed to start transcription: {e}")
             await websocket.send_json(msg.model_dump())
         except Exception:
             pass
 
-    # Wait for ALL pending claim tasks
+    # --- Session-end ordering ---
+    # 1. Compute duration and send session_ended immediately so the
+    #    client gets fast feedback.
+    # 2. Close WebSocket cleanly (code 1000).
+    # 3. Wait for in-flight claim tasks to finish their DB writes.
+    #    (WS is closed, so claim tasks skip sends but still persist
+    #    verdicts — thanks to the ws_alive guard in _process_claims_batch.)
+    # 4. Finalize session LAST so claim_count in DB is accurate.
+    if not session_failed:
+        duration = time.monotonic() - persistence._started_at
+
+        # Notify client that session is complete
+        try:
+            ended_msg = WSSessionEndedMessage(
+                session_id=str(persistence.session_id) if persistence.session_id else "",
+                duration_seconds=round(duration, 2),
+            )
+            await websocket.send_json(ended_msg.model_dump())
+        except Exception:
+            pass
+
+    # Close WebSocket cleanly before waiting for claim tasks.
+    try:
+        await websocket.close(code=1000)
+    except Exception:
+        pass
+
+    # Wait for ALL pending claim tasks (verification + DB writes).
     if claim_tasks:
         await asyncio.wait(claim_tasks, timeout=SETTINGS.CLAIM_TASK_TIMEOUT_S)
+
+    # Finalize session in DB with accurate counts (claims are all persisted now).
+    if not session_failed:
+        try:
+            await persistence.finalize_session()
+        except Exception as exc:
+            logger.error(f"Failed to finalize session: {exc}")
 
     logger.info(
         f"Live transcription ended: vault={vault_id}, "
@@ -387,6 +488,7 @@ async def live_transcribe(
 def _spawn_claim_task(
     websocket: WebSocket,
     buffer: "_TranscriptBuffer",
+    persistence: "_SessionPersistence",
     vault_id: UUID,
     claim_tasks: set[asyncio.Task],
     claim_semaphore: asyncio.Semaphore,
@@ -405,6 +507,7 @@ def _spawn_claim_task(
     Args:
         websocket: The WebSocket to push results to.
         buffer: The transcript buffer with context and unchecked segments.
+        persistence: Session persistence for DB writes.
         vault_id: Vault to verify claims against.
         claim_tasks: Set to track active tasks (for cleanup).
         claim_semaphore: Semaphore limiting concurrent API calls.
@@ -418,7 +521,7 @@ def _spawn_claim_task(
     async def _guarded_process() -> None:
         async with claim_semaphore:
             await _process_claims_batch(
-                websocket, buffer, vault_id,
+                websocket, buffer, persistence, vault_id,
                 context_segments, unchecked, entity_summary,
             )
 
@@ -430,10 +533,13 @@ def _spawn_claim_task(
 async def _authenticate_websocket(
     websocket: WebSocket, db: AsyncSession,
 ) -> User | None:
-    """Authenticate a WebSocket connection using session cookies or query params.
+    """Authenticate a WebSocket connection using WS ticket, session cookie, or query params.
 
-    Checks for ``session_id`` query parameter first (cross-origin use
-    from Streamlit), then falls back to the session cookie.
+    Tries authentication in order:
+      1. ``ticket`` query param — one-time WS ticket from ``POST /auth/ws-ticket``.
+         Consumed on use (cannot be replayed).
+      2. ``session_id`` query param — cross-origin use from Streamlit.
+      3. ``session_id`` cookie — same-origin browser requests.
 
     Args:
         websocket: The WebSocket connection.
@@ -442,19 +548,29 @@ async def _authenticate_websocket(
     Returns:
         User | None: The authenticated user, or None if auth fails.
     """
-    from app.core.tools.redis import get_session
+    from app.core.tools.redis import get_session, consume_ws_ticket
 
-    # Query param takes priority (cross-origin from Streamlit)
-    session_id = websocket.query_params.get("session_id")
-    if not session_id:
-        session_id = websocket.cookies.get(SETTINGS.SESSION_COOKIE_NAME)
-    if not session_id:
-        await websocket.close(code=4001, reason="Not authenticated")
-        return None
+    user_id: str | None = None
 
-    user_id = await get_session(session_id)
+    # 1. One-time WS ticket (frontend flow)
+    ticket = websocket.query_params.get("ticket")
+    if ticket:
+        user_id = await consume_ws_ticket(ticket)
+
+    # 2. Session ID query param (Streamlit cross-origin)
     if not user_id:
-        await websocket.close(code=4001, reason="Session expired")
+        session_id = websocket.query_params.get("session_id")
+        if session_id:
+            user_id = await get_session(session_id)
+
+    # 3. Session cookie (same-origin)
+    if not user_id:
+        session_id = websocket.cookies.get(SETTINGS.SESSION_COOKIE_NAME)
+        if session_id:
+            user_id = await get_session(session_id)
+
+    if not user_id:
+        await websocket.close(code=4001, reason="Not authenticated")
         return None
 
     from sqlmodel import select
@@ -471,6 +587,7 @@ async def _authenticate_websocket(
 async def _process_claims_batch(
     websocket: WebSocket,
     buffer: "_TranscriptBuffer",
+    persistence: "_SessionPersistence",
     vault_id: UUID,
     context_segments: list[TranscriptSegment],
     unchecked: list[TranscriptSegment],
@@ -488,9 +605,13 @@ async def _process_claims_batch(
     with its own DB session).  This is critical for meeting scenarios
     where multiple speakers make several claims in the same batch.
 
+    Each claim is persisted to the database on detection (pending),
+    then updated with the verification verdict after verification.
+
     Args:
         websocket: The WebSocket to push results to.
         buffer: The transcript buffer (for dedup and entity tracking).
+        persistence: Session persistence for DB writes.
         vault_id: Vault to verify claims against.
         context_segments: Prior segments for reference resolution.
         unchecked: New segments to check for claims.
@@ -515,17 +636,29 @@ async def _process_claims_batch(
         if not new_claims:
             return
 
-        # 1. Notify ALL claims detected FIRST (fast — no API calls)
+        # 1. Persist + notify ALL claims detected FIRST (fast — no API calls)
+        #    WS sends are best-effort — if the WebSocket is closed
+        #    (e.g. session ended), we still MUST persist claims and
+        #    proceed to verification.  Never abort on send failure.
+        ws_alive = True
+        claim_db_ids: dict[str, UUID] = {}
         for claim in new_claims:
-            detected_msg = WSClaimDetectedMessage(
-                claim_id=claim.id,
-                text=claim.text,
-                speaker=claim.speaker,
-            )
             try:
-                await websocket.send_json(detected_msg.model_dump())
-            except Exception:
-                return
+                db_id = await persistence.persist_claim(claim)
+                claim_db_ids[claim.id] = db_id
+            except Exception as exc:
+                logger.error(f"Failed to persist claim '{claim.text[:50]}': {exc}")
+
+            if ws_alive:
+                detected_msg = WSClaimDetectedMessage(
+                    claim_id=claim.id,
+                    text=claim.text,
+                    speaker=claim.speaker,
+                )
+                try:
+                    await websocket.send_json(detected_msg.model_dump())
+                except Exception:
+                    ws_alive = False
 
         # 2. Verify ALL claims concurrently (each with its own DB session)
         verifier = get_claim_verifier()
@@ -540,25 +673,285 @@ async def _process_claims_batch(
 
         verdicts = await asyncio.gather(*[_verify_one(c) for c in new_claims])
 
-        # 3. Send verification results
-        for verdict in verdicts:
+        # 3. Persist verdict + send verification results
+        for claim, verdict in zip(new_claims, verdicts):
             if verdict is None:
                 continue
-            verified_msg = WSClaimVerifiedMessage(
-                claim_id=verdict.claim_id,
-                claim_text=verdict.claim_text,
-                verdict=verdict.verdict,
-                confidence=verdict.confidence,
-                explanation=verdict.explanation,
-                evidence=verdict.evidence,
-            )
-            try:
-                await websocket.send_json(verified_msg.model_dump())
-            except Exception:
-                return
+
+            # Persist verdict to DB
+            db_id = claim_db_ids.get(claim.id)
+            if db_id:
+                try:
+                    await persistence.update_verdict(
+                        claim_id=db_id,
+                        verdict=verdict.verdict,
+                        confidence=verdict.confidence,
+                        explanation=verdict.explanation,
+                        evidence=verdict.evidence,
+                    )
+                except Exception as exc:
+                    logger.error(f"Failed to persist verdict for '{claim.text[:50]}': {exc}")
+
+            if ws_alive:
+                verified_msg = WSClaimVerifiedMessage(
+                    claim_id=verdict.claim_id,
+                    claim_text=verdict.claim_text,
+                    verdict=verdict.verdict,
+                    confidence=verdict.confidence,
+                    explanation=verdict.explanation,
+                    evidence=verdict.evidence,
+                )
+                try:
+                    await websocket.send_json(verified_msg.model_dump())
+                except Exception:
+                    ws_alive = False
 
     except Exception as e:
         logger.error(f"Claim processing error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Session persistence — DB writes for transcription sessions
+# ---------------------------------------------------------------------------
+
+class _SessionPersistence:
+    """Manages database persistence for a live transcription session.
+
+    All writes use ``get_db_session()`` so each operation gets its own
+    short-lived connection — safe for long-running WebSocket handlers
+    that outlive the request-scoped session.
+
+    Segments are buffered in memory and flushed in batches to reduce
+    DB round-trips during high-frequency transcription.
+
+    Args:
+        vault_id: The vault this session belongs to.
+        user_id: The user who started the session.
+    """
+
+    def __init__(self, vault_id: UUID, user_id: UUID) -> None:
+        self.vault_id = vault_id
+        self.user_id = user_id
+        self.session_id: UUID | None = None
+
+        self._segment_buffer: list[TranscriptSegment] = []
+        self._segment_index: int = 0
+        self._speakers: set[int] = set()
+        self._started_at: float = time.monotonic()
+
+    # ------------------------------------------------------------------
+    # Session lifecycle
+    # ------------------------------------------------------------------
+
+    async def create_session(self) -> None:
+        """Create a new transcription session row in the database."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        session = TranscriptionSession(
+            vault_id=self.vault_id,
+            user_id=self.user_id,
+            title=f"Session {now.strftime('%Y-%m-%d %H:%M')}",
+            status="recording",
+            started_at=now,
+        )
+        async with get_db_session() as db:
+            db.add(session)
+            await db.commit()
+            await db.refresh(session)
+        self.session_id = session.id
+
+    async def finalize_session(self) -> float:
+        """Mark session as completed and compute aggregate stats.
+
+        Returns:
+            float: Session duration in seconds.
+        """
+        await self.flush_segments()
+        duration = time.monotonic() - self._started_at
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        async with get_db_session() as db:
+            from sqlmodel import select, func
+
+            session = (
+                await db.execute(
+                    select(TranscriptionSession).where(
+                        TranscriptionSession.id == self.session_id
+                    )
+                )
+            ).scalars().first()
+            if session is None:
+                logger.error(f"Session {self.session_id} not found for finalization")
+                return duration
+
+            # Compute segment / claim counts from DB
+            seg_count = (
+                await db.execute(
+                    select(func.count()).where(
+                        TranscriptionSegmentModel.session_id == self.session_id
+                    )
+                )
+            ).scalar() or 0
+
+            claim_count = (
+                await db.execute(
+                    select(func.count()).where(
+                        TranscriptionClaim.session_id == self.session_id
+                    )
+                )
+            ).scalar() or 0
+
+            session.status = "completed"
+            session.duration_seconds = round(duration, 2)
+            session.ended_at = now
+            session.segment_count = seg_count
+            session.claim_count = claim_count
+            session.speaker_count = len(self._speakers)
+            await db.commit()
+
+        logger.info(
+            f"Session {self.session_id} finalized: "
+            f"{seg_count} segments, {claim_count} claims, "
+            f"{duration:.1f}s duration",
+        )
+        return duration
+
+    async def fail_session(self) -> None:
+        """Mark session as failed."""
+        if self.session_id is None:
+            return
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        async with get_db_session() as db:
+            from sqlmodel import select
+            session = (
+                await db.execute(
+                    select(TranscriptionSession).where(
+                        TranscriptionSession.id == self.session_id
+                    )
+                )
+            ).scalars().first()
+            if session:
+                session.status = "failed"
+                session.ended_at = now
+                await db.commit()
+
+    # ------------------------------------------------------------------
+    # Segment buffering
+    # ------------------------------------------------------------------
+
+    def buffer_segment(self, segment: TranscriptSegment) -> None:
+        """Add a segment to the in-memory buffer for later DB flush.
+
+        Only final segments are buffered (matching ``_TranscriptBuffer``
+        behaviour). Interim segments are for live UI preview only.
+
+        Args:
+            segment: The transcript segment from DeepGram.
+        """
+        if not segment.is_final:
+            return
+        self._speakers.add(segment.speaker)
+        self._segment_buffer.append(segment)
+
+    async def flush_segments(self) -> None:
+        """Write buffered segments to the database and clear the buffer.
+
+        Assigns sequential ``segment_index`` values so ordering is
+        preserved even if segments arrive out of timestamp order
+        (which does not happen with DeepGram, but is safe regardless).
+        """
+        if not self._segment_buffer or self.session_id is None:
+            return
+
+        batch = self._segment_buffer[:]
+        self._segment_buffer.clear()
+
+        rows = []
+        for seg in batch:
+            rows.append(
+                TranscriptionSegmentModel(
+                    session_id=self.session_id,
+                    text=seg.text,
+                    speaker=seg.speaker,
+                    start=seg.start,
+                    end=seg.end,
+                    confidence=seg.confidence,
+                    segment_index=self._segment_index,
+                )
+            )
+            self._segment_index += 1
+
+        try:
+            async with get_db_session() as db:
+                db.add_all(rows)
+                await db.commit()
+        except Exception as e:
+            logger.error(f"Failed to flush {len(rows)} segments: {e}")
+            # Put segments back so they can be retried on next flush
+            self._segment_buffer = batch + self._segment_buffer
+            self._segment_index -= len(rows)
+
+    # ------------------------------------------------------------------
+    # Claim persistence
+    # ------------------------------------------------------------------
+
+    async def persist_claim(self, claim: Claim) -> UUID:
+        """Insert a detected claim into the database with ``pending`` verdict.
+
+        Args:
+            claim: The detected claim.
+
+        Returns:
+            UUID: The persisted claim row ID.
+        """
+        row = TranscriptionClaim(
+            session_id=self.session_id,
+            text=claim.text,
+            speaker=claim.speaker,
+            timestamp_start=claim.timestamp_start,
+            timestamp_end=claim.timestamp_end,
+            context=claim.context,
+            verdict="pending",
+        )
+        async with get_db_session() as db:
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+        return row.id
+
+    async def update_verdict(
+        self,
+        claim_id: UUID,
+        verdict: str,
+        confidence: float,
+        explanation: str,
+        evidence: list[dict] | None,
+    ) -> None:
+        """Update a claim row with the verification result.
+
+        Args:
+            claim_id: The claim row to update.
+            verdict: Verification verdict string.
+            confidence: Confidence score.
+            explanation: Explanation text.
+            evidence: List of evidence dicts (serialized to JSON).
+        """
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        async with get_db_session() as db:
+            from sqlmodel import select
+            row = (
+                await db.execute(
+                    select(TranscriptionClaim).where(
+                        TranscriptionClaim.id == claim_id
+                    )
+                )
+            ).scalars().first()
+            if row:
+                row.verdict = verdict
+                row.confidence = confidence
+                row.explanation = explanation
+                row.evidence_json = json_mod.dumps(evidence) if evidence else None
+                row.updated_at = now
+                await db.commit()
 
 
 # ---------------------------------------------------------------------------
