@@ -5,19 +5,25 @@
  * to the main thread via postMessage. The main thread then sends
  * these samples over the WebSocket to the backend.
  *
- * Audio is buffered to ~256 ms chunks (4096 samples at 16 kHz)
+ * Supports mono (mic-only) and stereo (mic + system audio) modes.
+ * Channel count is detected automatically from the first process()
+ * call. In stereo mode, samples are interleaved [L, R, L, R, …]
+ * matching DeepGram's expected multichannel linear16 format.
+ *
+ * Audio is buffered to ~256 ms chunks (4096 frames at 16 kHz)
  * to reduce WebSocket message rate from ~125/s to ~4/s.  This
  * dramatically lowers event-loop overhead on both browser and
  * backend while keeping latency imperceptible for live use.
  */
 
-const BUFFER_SIZE = 4096; // samples (~256 ms at 16 kHz)
+const FRAMES_PER_BUFFER = 4096; // frames per channel (~256 ms at 16 kHz)
 
 class VadProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this._buffer = new Float32Array(BUFFER_SIZE);
-    this._offset = 0;
+    this._channels = 0; // detected on first process() call
+    this._buffer = null;
+    this._frameOffset = 0;
   }
 
   process(inputs) {
@@ -26,24 +32,44 @@ class VadProcessor extends AudioWorkletProcessor {
       return true;
     }
 
-    const samples = input[0];
-    let srcOffset = 0;
+    const channels = input.length; // 1 = mono, 2 = stereo
+    const frameCount = input[0].length; // typically 128
 
-    while (srcOffset < samples.length) {
-      const remaining = BUFFER_SIZE - this._offset;
-      const toCopy = Math.min(remaining, samples.length - srcOffset);
+    // (Re-)initialise buffer when channel count changes or on first call
+    if (this._channels !== channels) {
+      this._channels = channels;
+      this._buffer = new Float32Array(FRAMES_PER_BUFFER * channels);
+      this._frameOffset = 0;
+    }
 
-      this._buffer.set(
-        samples.subarray(srcOffset, srcOffset + toCopy),
-        this._offset,
-      );
-      this._offset += toCopy;
-      srcOffset += toCopy;
+    let srcFrame = 0;
 
-      if (this._offset >= BUFFER_SIZE) {
+    while (srcFrame < frameCount) {
+      const remainingFrames = FRAMES_PER_BUFFER - this._frameOffset;
+      const framesToCopy = Math.min(remainingFrames, frameCount - srcFrame);
+
+      if (channels === 1) {
+        // Mono — direct copy (same as original behaviour)
+        this._buffer.set(
+          input[0].subarray(srcFrame, srcFrame + framesToCopy),
+          this._frameOffset,
+        );
+      } else {
+        // Stereo — interleave ch0 (mic) and ch1 (system) per frame
+        for (let f = 0; f < framesToCopy; f++) {
+          const bufIdx = (this._frameOffset + f) * 2;
+          this._buffer[bufIdx] = input[0][srcFrame + f];
+          this._buffer[bufIdx + 1] = input[1][srcFrame + f];
+        }
+      }
+
+      this._frameOffset += framesToCopy;
+      srcFrame += framesToCopy;
+
+      if (this._frameOffset >= FRAMES_PER_BUFFER) {
         // Buffer full — send to main thread
         this.port.postMessage(new Float32Array(this._buffer));
-        this._offset = 0;
+        this._frameOffset = 0;
       }
     }
 

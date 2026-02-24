@@ -34,6 +34,9 @@ export type TranscriptionStatus =
   | "stopping"
   | "error";
 
+/** Audio capture mode — mic-only or meeting (mic + system audio). */
+export type AudioMode = "mic" | "meeting";
+
 // ---------------------------------------------------------------------------
 // WS message types (mirrors backend schema literals)
 // ---------------------------------------------------------------------------
@@ -102,9 +105,12 @@ export function useTranscription() {
   const [duration, setDuration] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  /** True when meeting-mode system audio is active. */
+  const [systemAudioActive, setSystemAudioActive] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const systemStreamRef = useRef<MediaStream | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -157,16 +163,27 @@ export function useTranscription() {
       mediaStreamRef.current.getTracks().forEach((t) => t.stop());
       mediaStreamRef.current = null;
     }
+    if (systemStreamRef.current) {
+      systemStreamRef.current.getTracks().forEach((t) => t.stop());
+      systemStreamRef.current = null;
+    }
+    setSystemAudioActive(false);
   }
 
-  /** Start a live transcription session. */
-  const start = useCallback(async (vaultId: string) => {
+  /** Start a live transcription session.
+   *
+   * @param vaultId  Vault to verify claims against.
+   * @param audioMode  ``"mic"`` for microphone only (default),
+   *                   ``"meeting"`` to also capture system/tab audio.
+   */
+  const start = useCallback(async (vaultId: string, audioMode: AudioMode = "mic") => {
     setError(null);
     setSegments([]);
     setClaims([]);
     setSessionId(null);
     setDuration(null);
     setElapsed(0);
+    setSystemAudioActive(false);
     setStatus("connecting");
 
     try {
@@ -176,34 +193,108 @@ export function useTranscription() {
         { method: "POST" },
       );
 
-      // 2. Get microphone access
-      const stream = await navigator.mediaDevices.getUserMedia({
+      // 2. In meeting mode, capture system / tab audio FIRST so we
+      //    can decide whether to keep echo cancellation on the mic.
+      //    If system audio is available → 2-channel multichannel mode.
+      //    If not (e.g. shared entire screen on macOS) → fall back to
+      //    mic-only with echo cancellation OFF so the mic picks up
+      //    meeting audio from speakers for better diarization.
+      let systemStream: MediaStream | null = null;
+      let channels = 1;
+      let micEchoCancellation = true;
+
+      if (audioMode === "meeting") {
+        try {
+          // getDisplayMedia requires video; we discard the video track.
+          // Audio processing is disabled so we get the raw meeting audio.
+          const displayStream = await navigator.mediaDevices.getDisplayMedia({
+            audio: {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+            },
+            video: true,
+          });
+
+          // Discard video track — we only need audio
+          displayStream.getVideoTracks().forEach((t) => t.stop());
+
+          if (displayStream.getAudioTracks().length > 0) {
+            systemStream = displayStream;
+            systemStreamRef.current = systemStream;
+            channels = 2;
+            setSystemAudioActive(true);
+
+            // If the user stops sharing, channel 1 goes silent but
+            // the session continues with mic-only audio.
+            displayStream.getAudioTracks()[0].addEventListener("ended", () => {
+              setSystemAudioActive(false);
+            });
+          } else {
+            // Entire screen / window share — no audio track available.
+            // Disable echo cancellation so the mic picks up meeting
+            // audio through speakers for better speaker diarization.
+            micEchoCancellation = false;
+            setError(
+              "No audio in the shared source. " +
+              "Tip: share a Chrome browser tab to capture meeting audio directly. " +
+              "Continuing with microphone only.",
+            );
+          }
+        } catch {
+          // User denied screen share or browser doesn't support it.
+          // Fall back to mic-only silently — not a fatal error.
+        }
+      }
+
+      // 3. Get microphone access — constraints depend on whether
+      //    system audio was captured.
+      const micStream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          echoCancellation: true,
+          echoCancellation: micEchoCancellation,
           noiseSuppression: true,
           autoGainControl: true,
         },
       });
-      mediaStreamRef.current = stream;
+      mediaStreamRef.current = micStream;
 
-      // 3. Set up AudioContext + AudioWorklet for raw PCM
+      // 4. Set up AudioContext + AudioWorklet for raw PCM
       const audioCtx = new AudioContext({ sampleRate: 16000 });
       audioCtxRef.current = audioCtx;
 
       await audioCtx.audioWorklet.addModule("/vad-processor.js");
 
-      const source = audioCtx.createMediaStreamSource(stream);
-      const workletNode = new AudioWorkletNode(audioCtx, "vad-processor");
+      const micSource = audioCtx.createMediaStreamSource(micStream);
+      let workletNode: AudioWorkletNode;
+
+      if (systemStream) {
+        // Meeting mode: merge mic (ch 0) + system (ch 1) into stereo
+        const sysSource = audioCtx.createMediaStreamSource(systemStream);
+        const merger = audioCtx.createChannelMerger(2);
+        micSource.connect(merger, 0, 0); // mic  → left channel
+        sysSource.connect(merger, 0, 1); // sys  → right channel
+
+        workletNode = new AudioWorkletNode(audioCtx, "vad-processor", {
+          channelCount: 2,
+          channelCountMode: "explicit",
+        });
+        merger.connect(workletNode);
+      } else {
+        // Mic-only mode (original path)
+        channels = 1; // reset in case getDisplayMedia failed
+        workletNode = new AudioWorkletNode(audioCtx, "vad-processor");
+        micSource.connect(workletNode);
+      }
+
       workletNodeRef.current = workletNode;
-      source.connect(workletNode);
       workletNode.connect(audioCtx.destination);
 
-      // 4. Open WebSocket — connect directly to backend (Next.js API routes
+      // 5. Open WebSocket — connect directly to backend (Next.js API routes
       //    don't support WebSocket upgrade, so we bypass the BFF for WS).
       const backendWsUrl =
         process.env.NEXT_PUBLIC_WS_URL
-          ? `${process.env.NEXT_PUBLIC_WS_URL}/vaults/${vaultId}/transcribe/live?ticket=${ticket}&sample_rate=${audioCtx.sampleRate}`
-          : `ws://localhost:8080/vaults/${vaultId}/transcribe/live?ticket=${ticket}&sample_rate=${audioCtx.sampleRate}`;
+          ? `${process.env.NEXT_PUBLIC_WS_URL}/vaults/${vaultId}/transcribe/live?ticket=${ticket}&sample_rate=${audioCtx.sampleRate}&channels=${channels}`
+          : `ws://localhost:8080/vaults/${vaultId}/transcribe/live?ticket=${ticket}&sample_rate=${audioCtx.sampleRate}&channels=${channels}`;
 
       const ws = new WebSocket(backendWsUrl);
       wsRef.current = ws;
@@ -215,8 +306,9 @@ export function useTranscription() {
         workletNode.port.onmessage = (event) => {
           if (ws.readyState === WebSocket.OPEN && event.data) {
             // event.data is a Float32Array from the worklet
+            // (mono: 4096 samples, stereo: 8192 interleaved samples)
             const float32 = event.data as Float32Array;
-            // Convert to 16-bit PCM
+            // Convert to 16-bit PCM (interleaved format preserved)
             const pcm16 = new Int16Array(float32.length);
             for (let i = 0; i < float32.length; i++) {
               const s = Math.max(-1, Math.min(1, float32[i]));
@@ -285,10 +377,15 @@ export function useTranscription() {
       mediaStreamRef.current.getTracks().forEach((t) => t.stop());
       mediaStreamRef.current = null;
     }
+    if (systemStreamRef.current) {
+      systemStreamRef.current.getTracks().forEach((t) => t.stop());
+      systemStreamRef.current = null;
+    }
     if (audioCtxRef.current) {
       audioCtxRef.current.close().catch(() => {});
       audioCtxRef.current = null;
     }
+    setSystemAudioActive(false);
 
     // WS will close after backend drains
   }, []);
@@ -374,6 +471,7 @@ export function useTranscription() {
     duration,
     error,
     elapsed,
+    systemAudioActive,
     start,
     stop,
     reset,

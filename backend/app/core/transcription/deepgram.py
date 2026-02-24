@@ -224,6 +224,11 @@ class DeepgramTranscriber:
         Used as an async context manager. The underlying DeepGram
         WebSocket is automatically closed on exit.
 
+        When ``channels > 1``, multichannel mode is enabled so that
+        DeepGram processes each channel independently.  This is used
+        for meeting capture where channel 0 = microphone (local user)
+        and channel 1 = system/tab audio (remote participants).
+
         Args:
             sample_rate: Audio sample rate in Hz.
             encoding: Audio encoding format.
@@ -235,21 +240,29 @@ class DeepgramTranscriber:
         Raises:
             TranscriptionError: If the connection fails to start.
         """
+        multichannel = channels > 1
         try:
-            async with self._client.listen.v1.connect(
-                model=self._model,
-                language=self._language,
-                smart_format="true",
-                diarize=str(SETTINGS.DEEPGRAM_DIARIZE).lower(),
-                punctuate="true",
-                encoding=encoding,
-                sample_rate=str(sample_rate),
-                channels=str(channels),
-                interim_results="true",
-                utterance_end_ms=str(SETTINGS.DEEPGRAM_UTTERANCE_END_MS),
-            ) as ws:
-                logger.info("DeepGram live connection started")
-                yield DeepgramLiveConnection(ws)
+            options: dict[str, str] = {
+                "model": self._model,
+                "language": self._language,
+                "smart_format": "true",
+                "diarize": str(SETTINGS.DEEPGRAM_DIARIZE).lower(),
+                "punctuate": "true",
+                "encoding": encoding,
+                "sample_rate": str(sample_rate),
+                "channels": str(channels),
+                "interim_results": "true",
+                "utterance_end_ms": str(SETTINGS.DEEPGRAM_UTTERANCE_END_MS),
+            }
+            if multichannel:
+                options["multichannel"] = "true"
+
+            async with self._client.listen.v1.connect(**options) as ws:
+                logger.info(
+                    f"DeepGram live connection started "
+                    f"(channels={channels}, multichannel={multichannel})"
+                )
+                yield DeepgramLiveConnection(ws, multichannel=multichannel)
                 logger.info("DeepGram live connection closing")
         except Exception as e:
             logger.error(f"DeepGram live session error: {e}")
@@ -262,13 +275,20 @@ class DeepgramLiveConnection:
     Wraps the DeepGram ``AsyncV1SocketClient`` to provide typed
     ``send_audio``, ``receive``, ``finalize``, and ``close`` methods.
 
+    In multichannel mode, speaker IDs are remapped so that:
+      - Channel 0 (mic / local user) → always Speaker 0.
+      - Channel 1 (system / remote)  → Speaker ``diarised_id + 1``
+        to avoid collision with the local speaker.
+
     Args:
         ws: The underlying DeepGram WebSocket client.
+        multichannel: Whether multichannel mode is active.
     """
 
-    def __init__(self, ws: Any) -> None:
+    def __init__(self, ws: Any, multichannel: bool = False) -> None:
         self._ws = ws
         self._closed = False
+        self._multichannel = multichannel
 
     async def send_audio(self, audio_chunk: bytes) -> None:
         """Send an audio chunk to the live transcription stream.
@@ -342,6 +362,23 @@ class DeepgramLiveConnection:
                 primary_speaker = max(speaker_counts, key=speaker_counts.get)
             else:
                 primary_speaker = 0
+
+            # Multichannel speaker remapping:
+            #   Ch 0 (mic)    → always Speaker 0 (local user)
+            #   Ch 1 (system) → Speaker N + 1 (remote participants)
+            #
+            # NOTE: DeepGram's ``channel_index`` is ``List[float]``
+            # (e.g. ``[0.0]``), not a plain int.  We must extract
+            # the first element before comparing.
+            if self._multichannel:
+                raw_ci = getattr(result, "channel_index", [0])
+                ch_idx = int(raw_ci[0]) if isinstance(raw_ci, (list, tuple)) and raw_ci else 0
+                if ch_idx == 0:
+                    primary_speaker = 0
+                else:
+                    # Offset remote speakers to avoid collision with
+                    # local speaker 0.
+                    primary_speaker = primary_speaker + 1
 
             return TranscriptSegment(
                 text=transcript_text,

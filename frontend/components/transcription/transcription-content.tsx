@@ -11,6 +11,7 @@ import {
   XCircle,
   AlertTriangle,
   Loader2,
+  Monitor,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { VERDICT_LABELS, VERDICT_VARIANT } from "@/lib/constants";
@@ -23,6 +24,7 @@ import {
   useTranscription,
   type LiveSegment,
   type LiveClaim,
+  type AudioMode,
 } from "@/hooks/use-transcription";
 
 // ---------------------------------------------------------------------------
@@ -148,6 +150,7 @@ export default function TranscriptionContent() {
   const { data: vaults } = useSWR<Vault[]>("/api/vaults", fetcher);
 
   const [selectedVaultId, setSelectedVaultId] = useState("");
+  const [audioMode, setAudioMode] = useState<AudioMode>("mic");
   const {
     status,
     segments,
@@ -156,6 +159,7 @@ export default function TranscriptionContent() {
     duration,
     error,
     elapsed,
+    systemAudioActive,
     start,
     stop,
     reset,
@@ -210,6 +214,38 @@ export default function TranscriptionContent() {
           {selectedVault?.document_count === 0 && (
             <Badge variant="warning">No documents</Badge>
           )}
+
+          {/* Audio mode toggle */}
+          <div className="flex h-9 items-center rounded-lg border border-neutral-200 p-0.5 dark:border-neutral-700">
+            <button
+              type="button"
+              onClick={() => setAudioMode("mic")}
+              disabled={isActive}
+              className={cn(
+                "inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors disabled:opacity-50",
+                audioMode === "mic"
+                  ? "bg-foreground text-background"
+                  : "text-neutral-500 hover:text-foreground dark:text-neutral-400",
+              )}
+            >
+              <Mic className="h-3.5 w-3.5" />
+              Mic Only
+            </button>
+            <button
+              type="button"
+              onClick={() => setAudioMode("meeting")}
+              disabled={isActive}
+              className={cn(
+                "inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors disabled:opacity-50",
+                audioMode === "meeting"
+                  ? "bg-foreground text-background"
+                  : "text-neutral-500 hover:text-foreground dark:text-neutral-400",
+              )}
+            >
+              <Monitor className="h-3.5 w-3.5" />
+              Meeting
+            </button>
+          </div>
         </div>
 
         <div className="flex items-center gap-3">
@@ -220,6 +256,12 @@ export default function TranscriptionContent() {
                 <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
               </span>
               {formatTime(elapsed)}
+              {systemAudioActive && (
+                <Badge variant="success">
+                  <Monitor className="mr-1 h-3 w-3" />
+                  Meeting
+                </Badge>
+              )}
             </div>
           )}
 
@@ -309,7 +351,7 @@ export default function TranscriptionContent() {
         <div className="flex justify-center">
           {status === "idle" || status === "error" ? (
             <button
-              onClick={() => selectedVaultId && start(selectedVaultId)}
+              onClick={() => selectedVaultId && start(selectedVaultId, audioMode)}
               disabled={!selectedVaultId || selectedVault?.document_count === 0}
               className="inline-flex h-12 items-center gap-2 rounded-full bg-foreground px-6 text-sm font-medium text-background transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
             >

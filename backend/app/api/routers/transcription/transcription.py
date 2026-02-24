@@ -255,10 +255,14 @@ async def live_transcribe(
 
     # Dynamic sample rate from client (browser AudioContext.sampleRate)
     sample_rate = int(websocket.query_params.get("sample_rate", "16000"))
+    channels = int(websocket.query_params.get("channels", "1"))
 
     session_failed = False
     try:
-        async with transcriber.live_session(sample_rate=sample_rate) as live:
+        async with transcriber.live_session(
+            sample_rate=sample_rate,
+            channels=channels,
+        ) as live:
 
             async def _receiver_loop() -> None:
                 """Receive transcripts from DeepGram and push to client.
