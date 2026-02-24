@@ -1,16 +1,8 @@
 from uuid import UUID, uuid4
 from datetime import datetime, timezone
+from app.db.models.utils import _utcnow_naive
 from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, SQLModel
-
-
-def _utcnow_naive() -> datetime:
-    """Return current UTC time without tzinfo.
-
-    Returns:
-        datetime: Current UTC time without tzinfo.
-    """
-    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class TranscriptionSegment(SQLModel, table=True):

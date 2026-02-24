@@ -1,6 +1,7 @@
 from uuid import UUID, uuid4
 from typing import Any
 from datetime import datetime, timezone
+from app.db.models.utils import _utcnow_naive
 from sqlalchemy import Column, UniqueConstraint, Text, ARRAY
 from sqlmodel import Field, SQLModel
 
@@ -9,15 +10,6 @@ try:
     VECTOR_TYPE = Vector(1536)
 except ImportError:
     VECTOR_TYPE = None
-
-
-def _utcnow_naive() -> datetime:
-    """Return current UTC time without tzinfo.
-
-    Returns:
-        datetime: Current UTC time without tzinfo.
-    """
-    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class Chunk(SQLModel, table=True):
