@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.logger import setup_logger
 from app.core.kafka.topics import (
-    EventType, FileUploadedEvent, AuditEvent, AUDIT_EVENTS,
+    FileUploadedEvent, AuditEvent, AUDIT_EVENTS, parse_file_event,
 )
 from app.core.utils import utcnow_aware
 from app.core.storage.local import LocalFileStore
@@ -36,14 +36,16 @@ class IngestionWorker(BaseWorker):
     - Pipeline failure → mark failed + DLQ
     """
 
+    batch_mode = True
+
     async def handle_batch(self, events: list[dict], db: AsyncSession) -> None:
         """Process a batch of file.uploaded events: parse, chunk, then batch-embed."""
-        # 1. Filter and validate events
+        # 1. Filter and validate events via discriminated union
         upload_events: list[FileUploadedEvent] = []
         for event in events:
-            if event.get("event_type") != EventType.FILE_UPLOADED:
-                continue
-            upload_events.append(FileUploadedEvent(**event))
+            parsed = parse_file_event(event)
+            if isinstance(parsed, FileUploadedEvent):
+                upload_events.append(parsed)
 
         if not upload_events:
             return

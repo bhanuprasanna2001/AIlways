@@ -147,15 +147,15 @@ def _build_workers(
     workers = []
 
     if worker_type in ("ingestion", "all"):
-        concurrency = settings.WORKER_INGESTION_CONCURRENCY
+        concurrency = settings.WORKER.INGESTION_CONCURRENCY
         for i in range(concurrency):
             consumer = KafkaConsumer(
                 topics=[FILE_EVENTS],
                 group_id=f"{settings.KAFKA_CONSUMER_GROUP}-ingestion",
                 bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
                 max_poll_interval_ms=settings.KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS,
-                max_batch_size=settings.WORKER_INGESTION_BATCH_SIZE,
-                batch_timeout_s=settings.WORKER_INGESTION_BATCH_TIMEOUT_S,
+                max_batch_size=settings.WORKER.INGESTION_BATCH_SIZE,
+                batch_timeout_s=settings.WORKER.INGESTION_BATCH_TIMEOUT_S,
             )
             workers.append(IngestionWorker(consumer, producer, session_factory))
         logger.info(f"Created {concurrency} ingestion worker instance(s)")
@@ -204,7 +204,7 @@ async def run(worker_type: str) -> None:
     # Ensure topics have enough partitions for concurrent consumers
     await _ensure_topic_partitions(
         settings.KAFKA_BOOTSTRAP_SERVERS,
-        settings.WORKER_INGESTION_CONCURRENCY,
+        settings.WORKER.INGESTION_CONCURRENCY,
     )
 
     # Recovery scan for stuck documents

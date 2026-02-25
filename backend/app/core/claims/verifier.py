@@ -186,7 +186,7 @@ class RAGClaimVerifier:
                 vault_id=vault_id,
                 db=db,
                 top_k=self._top_k,
-                mmr_lambda=SETTINGS.CLAIM_VERIFICATION_MMR_LAMBDA,
+                mmr_lambda=SETTINGS.CLAIM.VERIFICATION_MMR_LAMBDA,
             )
 
             # Merge: exact-ID hits first, then hybrid (deduplicated)

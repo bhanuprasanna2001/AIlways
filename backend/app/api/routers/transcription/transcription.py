@@ -103,7 +103,7 @@ async def transcribe_audio(
     claims_response: list[ClaimResponse] = []
     verdicts_response: list[ClaimVerdictResponse] = []
 
-    if SETTINGS.CLAIM_DETECTION_ENABLED and transcript.segments:
+    if SETTINGS.CLAIM.DETECTION_ENABLED and transcript.segments:
         from app.core.claims import get_claim_detector, get_claim_verifier
 
         detector = get_claim_detector()
@@ -223,7 +223,7 @@ async def live_transcribe(
 
     buffer = TranscriptBuffer(vault_id=vault_id)
     claim_tasks: set[asyncio.Task] = set()
-    claim_semaphore = asyncio.Semaphore(SETTINGS.CLAIM_MAX_CONCURRENT_TASKS)
+    claim_semaphore = asyncio.Semaphore(SETTINGS.CLAIM.MAX_CONCURRENT_TASKS)
     stop_event = asyncio.Event()
 
     transcriber = get_transcriber()
@@ -273,10 +273,10 @@ async def live_transcribe(
             # -- Flush timer: sole claim trigger ----------------------------
             async def _flush_timer_loop() -> None:
                 while not stop_event.is_set():
-                    await asyncio.sleep(SETTINGS.CLAIM_FLUSH_INTERVAL_S)
+                    await asyncio.sleep(SETTINGS.CLAIM.FLUSH_INTERVAL_S)
                     if stop_event.is_set():
                         break
-                    if SETTINGS.CLAIM_DETECTION_ENABLED and buffer.should_trigger_claims():
+                    if SETTINGS.CLAIM.DETECTION_ENABLED and buffer.should_trigger_claims():
                         spawn_claim_task(
                             websocket, buffer, persistence, vault_id,
                             claim_tasks, claim_semaphore,
@@ -285,7 +285,7 @@ async def live_transcribe(
             # -- DB flush: periodic segment persistence ---------------------
             async def _db_flush_loop() -> None:
                 while not stop_event.is_set():
-                    await asyncio.sleep(SETTINGS.TRANSCRIPTION_DB_FLUSH_INTERVAL_S)
+                    await asyncio.sleep(SETTINGS.TRANSCRIPTION.DB_FLUSH_INTERVAL_S)
                     if stop_event.is_set():
                         break
                     await persistence.flush_segments()
@@ -339,7 +339,7 @@ async def live_transcribe(
 
                 try:
                     await asyncio.wait_for(
-                        receiver_task, timeout=SETTINGS.CLAIM_DRAIN_TIMEOUT_S,
+                        receiver_task, timeout=SETTINGS.CLAIM.DRAIN_TIMEOUT_S,
                     )
                 except (asyncio.TimeoutError, asyncio.CancelledError):
                     receiver_task.cancel()
@@ -357,7 +357,7 @@ async def live_transcribe(
 
                 await persistence.flush_segments()
 
-                if SETTINGS.CLAIM_DETECTION_ENABLED and buffer.has_unchecked():
+                if SETTINGS.CLAIM.DETECTION_ENABLED and buffer.has_unchecked():
                     spawn_claim_task(
                         websocket, buffer, persistence, vault_id,
                         claim_tasks, claim_semaphore,
@@ -389,7 +389,7 @@ async def live_transcribe(
         pass
 
     if claim_tasks:
-        await asyncio.wait(claim_tasks, timeout=SETTINGS.CLAIM_TASK_TIMEOUT_S)
+        await asyncio.wait(claim_tasks, timeout=SETTINGS.CLAIM.TASK_TIMEOUT_S)
 
     if not session_failed:
         try:
@@ -428,9 +428,9 @@ def _validate_audio_size(audio_data: bytes) -> None:
             detail="Audio file is empty",
         )
     size_mb = len(audio_data) / (1024 * 1024)
-    if size_mb > SETTINGS.TRANSCRIPTION_MAX_AUDIO_SIZE_MB:
+    if size_mb > SETTINGS.TRANSCRIPTION.MAX_AUDIO_SIZE_MB:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Audio file too large: {size_mb:.1f}MB. "
-                   f"Maximum: {SETTINGS.TRANSCRIPTION_MAX_AUDIO_SIZE_MB}MB",
+                   f"Maximum: {SETTINGS.TRANSCRIPTION.MAX_AUDIO_SIZE_MB}MB",
         )

@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logger import setup_logger
 from app.core.kafka.topics import (
-    EventType, FileDeletedEvent, AuditEvent, AUDIT_EVENTS,
+    FileDeletedEvent, AuditEvent, AUDIT_EVENTS, parse_file_event,
 )
 from app.core.utils import utcnow, utcnow_aware
 from app.db.models import Document, Chunk
@@ -23,19 +23,11 @@ class DeletionWorker(BaseWorker):
     """
 
     async def handle_event(self, event: dict, db: AsyncSession) -> None:
-        """Process a single event from the file.events topic.
-
-        Only handles file.deleted events.
-
-        Args:
-            event: Deserialized JSON event payload.
-            db: Database session (scoped to this event).
-        """
-        event_type = event.get("event_type")
-        if event_type != EventType.FILE_DELETED:
+        """Process a single file.deleted event."""
+        parsed = parse_file_event(event)
+        if not isinstance(parsed, FileDeletedEvent):
             return
 
-        parsed = FileDeletedEvent(**event)
         doc_id = parsed.doc_id
 
         logger.info(f"Processing deletion for document {doc_id}")

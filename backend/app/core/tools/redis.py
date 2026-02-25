@@ -63,7 +63,7 @@ async def delete_session(session_id: str) -> None:
 async def store_ws_ticket(ticket: str, user_id: str) -> None:
     """Store a one-time WS ticket in Redis with TTL."""
     client = await get_redis_client()
-    await client.setex(f"ws_ticket:{ticket}", SETTINGS.TRANSCRIPTION_WS_TICKET_TTL_S, user_id)
+    await client.setex(f"ws_ticket:{ticket}", SETTINGS.TRANSCRIPTION.WS_TICKET_TTL_S, user_id)
 
 
 async def consume_ws_ticket(ticket: str) -> Optional[str]:

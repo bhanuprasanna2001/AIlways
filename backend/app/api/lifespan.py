@@ -28,7 +28,7 @@ async def _cleanup_stale_sessions() -> None:
     from app.core.utils import utcnow
 
     settings = get_settings()
-    cutoff = utcnow() - timedelta(minutes=settings.TRANSCRIPTION_SESSION_STALE_TIMEOUT_MINUTES)
+    cutoff = utcnow() - timedelta(minutes=settings.TRANSCRIPTION.SESSION_STALE_TIMEOUT_MINUTES)
 
     async with get_db_session() as db:
         result = await db.execute(

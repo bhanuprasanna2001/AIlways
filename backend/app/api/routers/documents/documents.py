@@ -237,7 +237,7 @@ async def list_documents(
     )
     documents = result.scalars().all()
 
-    return [DocumentResponse.from_model(doc) for doc in documents]
+    return [DocumentResponse.model_validate(doc) for doc in documents]
 
 
 @router.get("/{doc_id}", summary="Get document details")
@@ -261,7 +261,7 @@ async def get_document(
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    return DocumentResponse.from_model(doc)
+    return DocumentResponse.model_validate(doc)
 
 
 @router.get("/{doc_id}/status", summary="Poll document ingestion status")

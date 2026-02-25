@@ -175,7 +175,7 @@ class GroqClaimDetector:
         Retries on transient failures (rate limits, timeouts, server errors).
         Returns None on permanent failure.
         """
-        max_retries = SETTINGS.CLAIM_GROQ_MAX_RETRIES
+        max_retries = SETTINGS.CLAIM.GROQ_MAX_RETRIES
         delay = 1.0
 
         for attempt in range(max_retries + 1):
@@ -226,9 +226,9 @@ def _filter_segments(
     filtered: list[TranscriptSegment] = []
     for seg in segments:
         word_count = len(seg.text.split())
-        if word_count < SETTINGS.CLAIM_SEGMENT_MIN_WORDS:
+        if word_count < SETTINGS.CLAIM.SEGMENT_MIN_WORDS:
             continue
-        if seg.confidence < SETTINGS.CLAIM_SEGMENT_MIN_CONFIDENCE:
+        if seg.confidence < SETTINGS.CLAIM.SEGMENT_MIN_CONFIDENCE:
             continue
         filtered.append(seg)
     return filtered

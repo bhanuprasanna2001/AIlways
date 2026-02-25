@@ -1,8 +1,9 @@
 from enum import Enum
+from typing import Annotated, Literal, Union
 from uuid import UUID
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, TypeAdapter
 
 from app.core.utils import utcnow_aware as utcnow
 
@@ -32,7 +33,7 @@ class EventType(str, Enum):
 
 class FileUploadedEvent(BaseModel):
     """Produced when a file is uploaded and ready for ingestion."""
-    event_type: str = EventType.FILE_UPLOADED
+    event_type: Literal["file.uploaded"] = EventType.FILE_UPLOADED
     doc_id: UUID
     vault_id: UUID
     file_type: str
@@ -44,12 +45,25 @@ class FileUploadedEvent(BaseModel):
 
 class FileDeletedEvent(BaseModel):
     """Produced when a user requests document deletion."""
-    event_type: str = EventType.FILE_DELETED
+    event_type: Literal["file.deleted"] = EventType.FILE_DELETED
     doc_id: UUID
     vault_id: UUID
     deleted_by: UUID
     timestamp: datetime
 
+
+# Discriminated union — parse a raw dict into the correct event type.
+FileEvent = Annotated[
+    Union[FileUploadedEvent, FileDeletedEvent],
+    Field(discriminator="event_type"),
+]
+
+_file_event_adapter: TypeAdapter[FileEvent] = TypeAdapter(FileEvent)
+
+
+def parse_file_event(raw: dict) -> FileUploadedEvent | FileDeletedEvent:
+    """Validate a raw dict into the correct ``FileEvent`` variant."""
+    return _file_event_adapter.validate_python(raw)
 
 class AuditEvent(BaseModel):
     """Produced for async audit logging."""

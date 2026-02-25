@@ -50,7 +50,7 @@ class TranscriptBuffer:
         self._last_segment_time = time.monotonic()
 
         # Enforce rolling memory cap
-        max_segs = SETTINGS.CLAIM_MAX_BUFFER_SEGMENTS
+        max_segs = SETTINGS.CLAIM.MAX_BUFFER_SEGMENTS
         if len(self.segments) > max_segs:
             excess = len(self.segments) - max_segs
             self.segments = self.segments[excess:]
@@ -71,18 +71,18 @@ class TranscriptBuffer:
         now = time.monotonic()
 
         # Path 1: Speaker went idle
-        if (now - self._last_segment_time) >= SETTINGS.CLAIM_IDLE_TIMEOUT_S:
+        if (now - self._last_segment_time) >= SETTINGS.CLAIM.IDLE_TIMEOUT_S:
             return True
 
         # Path 2: Periodic check during long continuous speech
-        if (now - self._last_check_time) < SETTINGS.CLAIM_BATCH_INTERVAL_S:
+        if (now - self._last_check_time) < SETTINGS.CLAIM.BATCH_INTERVAL_S:
             return False
 
         unchecked = self.segments[self._last_check_idx:]
-        if len(unchecked) < SETTINGS.CLAIM_MIN_SEGMENTS:
+        if len(unchecked) < SETTINGS.CLAIM.MIN_SEGMENTS:
             return False
 
-        return sum(len(s.text) for s in unchecked) >= SETTINGS.CLAIM_MIN_CHARS
+        return sum(len(s.text) for s in unchecked) >= SETTINGS.CLAIM.MIN_CHARS
 
     def has_unchecked(self) -> bool:
         """Whether there are segments not yet sent for claim detection."""
@@ -94,7 +94,7 @@ class TranscriptBuffer:
         self,
     ) -> tuple[list[TranscriptSegment], list[TranscriptSegment]]:
         """Return (context_segments, unchecked_segments) and advance the pointer."""
-        context_start = max(0, self._last_check_idx - SETTINGS.CLAIM_CONTEXT_SEGMENTS)
+        context_start = max(0, self._last_check_idx - SETTINGS.CLAIM.CONTEXT_SEGMENTS)
         context = self.segments[context_start:self._last_check_idx]
         unchecked = self.segments[self._last_check_idx:]
 
@@ -126,7 +126,7 @@ class TranscriptBuffer:
                 continue
             intersection = len(fp_words & seen_words)
             union = len(fp_words | seen_words)
-            if union > 0 and (intersection / union) >= SETTINGS.CLAIM_DEDUP_THRESHOLD:
+            if union > 0 and (intersection / union) >= SETTINGS.CLAIM.DEDUP_THRESHOLD:
                 return True
         return False
 

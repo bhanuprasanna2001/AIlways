@@ -10,6 +10,15 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
+from functools import lru_cache
+from typing import Callable, TypeVar
+
+_T = TypeVar("_T")
+
+
+def singleton(fn: Callable[[], _T]) -> Callable[[], _T]:
+    """Decorator for zero-argument factory functions — caches the first result."""
+    return lru_cache(maxsize=1)(fn)  # type: ignore[return-value]
 
 
 def utcnow() -> datetime:
