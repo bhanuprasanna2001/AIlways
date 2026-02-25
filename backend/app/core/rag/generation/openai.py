@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import AsyncIterator
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from app.core.rag.retrieval.base import SearchResult
+from app.core.config import get_settings
+from app.core.rag.retrieval.base import SearchResult, build_retrieval_context
 from app.core.rag.generation.base import Citation, AnswerResult
 from app.core.logger import setup_logger
 
 logger = setup_logger(__name__)
+SETTINGS = get_settings()
 
 
 # ---------------------------------------------------------------------------
@@ -94,50 +98,60 @@ class OpenAIGenerator:
         if not results:
             return _INSUFFICIENT
 
-        context = _build_context(results)
+        context = build_retrieval_context(results)
         user_message = _USER_TEMPLATE.format(context=context, query=query)
 
         try:
-            response = await self._llm.ainvoke([
-                SystemMessage(content=_SYSTEM_PROMPT),
-                HumanMessage(content=user_message),
-            ])
-            return _parse_response(response.content)
+            response = await asyncio.wait_for(
+                self._llm.ainvoke([
+                    SystemMessage(content=_SYSTEM_PROMPT),
+                    HumanMessage(content=user_message),
+                ]),
+                timeout=SETTINGS.API_TIMEOUT_S,
+            )
+            return parse_response(response.content)
+        except asyncio.TimeoutError:
+            logger.error("Generation timed out")
+            return _INSUFFICIENT
         except Exception as e:
             logger.error(f"Generation failed: {e}")
             return _INSUFFICIENT
+
+    async def stream(self, query: str, results: list[SearchResult]) -> AsyncIterator[str]:
+        """Stream raw LLM response tokens.
+
+        Yields each content delta as a string. The caller accumulates
+        the full response and passes it to ``parse_response()`` for
+        structured parsing after the stream ends.
+
+        Falls back to a single yield of the full response on error.
+        """
+        if not query or not query.strip() or not results:
+            yield json.dumps(_INSUFFICIENT.model_dump())
+            return
+
+        context = build_retrieval_context(results)
+        user_message = _USER_TEMPLATE.format(context=context, query=query)
+
+        try:
+            async for chunk in self._llm.astream([
+                SystemMessage(content=_SYSTEM_PROMPT),
+                HumanMessage(content=user_message),
+            ]):
+                if chunk.content:
+                    yield chunk.content
+        except Exception as e:
+            logger.error(f"Streaming generation failed: {e}")
+            yield json.dumps(_INSUFFICIENT.model_dump())
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _build_context(results: list[SearchResult]) -> str:
-    """Build the context string from search results.
 
-    Args:
-        results: Retrieved chunks.
-
-    Returns:
-        str: Formatted context for the LLM prompt.
-    """
-    parts: list[str] = []
-    for i, r in enumerate(results, 1):
-        parts.append(f"--- Chunk {i} (score: {r.score:.3f}) ---")
-        parts.append(r.content_with_header)
-        parts.append("")
-    return "\n".join(parts)
-
-
-def _parse_response(raw: str) -> AnswerResult:
-    """Parse the LLM JSON response into an AnswerResult.
-
-    Args:
-        raw: Raw JSON string from the LLM.
-
-    Returns:
-        AnswerResult: Parsed result, or insufficient if parsing fails.
-    """
+def parse_response(raw: str) -> AnswerResult:
+    """Parse the LLM JSON response into an AnswerResult."""
     try:
         data = json.loads(raw)
 

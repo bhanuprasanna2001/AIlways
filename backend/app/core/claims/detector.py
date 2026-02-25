@@ -174,26 +174,23 @@ class GroqClaimDetector:
 
         Retries on transient failures (rate limits, timeouts, server errors).
         Returns None on permanent failure.
-
-        Args:
-            user_content: The user message for the chat completion.
-
-        Returns:
-            str | None: Raw JSON response, or None on failure.
         """
-        max_retries = SETTINGS.CLAIM_GROQ_MAX_RETRIES
+        max_retries = SETTINGS.CLAIM.GROQ_MAX_RETRIES
         delay = 1.0
 
         for attempt in range(max_retries + 1):
             try:
-                response = await self._client.chat.completions.create(
-                    model=self._model,
-                    messages=[
-                        {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user", "content": user_content},
-                    ],
-                    temperature=0.1,
-                    response_format={"type": "json_object"},
+                response = await asyncio.wait_for(
+                    self._client.chat.completions.create(
+                        model=self._model,
+                        messages=[
+                            {"role": "system", "content": _SYSTEM_PROMPT},
+                            {"role": "user", "content": user_content},
+                        ],
+                        temperature=0.1,
+                        response_format={"type": "json_object"},
+                    ),
+                    timeout=SETTINGS.API_TIMEOUT_S,
                 )
                 return response.choices[0].message.content
 
@@ -223,39 +220,22 @@ def _filter_segments(
 ) -> list[TranscriptSegment]:
     """Pre-filter segments to remove noise before sending to the LLM.
 
-    Removes segments that are:
-      - Ultra-short (fewer than ``CLAIM_SEGMENT_MIN_WORDS`` words).
-      - Low confidence (below ``CLAIM_SEGMENT_MIN_CONFIDENCE``).
-
-    This reduces Groq token waste and prevents false claims from
-    misheard fragments like "Uh", "Yeah", or profanity fragments.
-
-    Args:
-        segments: Raw segments from the transcription.
-
-    Returns:
-        list[TranscriptSegment]: Filtered segments worth checking.
+    Removes ultra-short (fewer than ``CLAIM_SEGMENT_MIN_WORDS`` words)
+    and low-confidence (below ``CLAIM_SEGMENT_MIN_CONFIDENCE``) segments.
     """
     filtered: list[TranscriptSegment] = []
     for seg in segments:
         word_count = len(seg.text.split())
-        if word_count < SETTINGS.CLAIM_SEGMENT_MIN_WORDS:
+        if word_count < SETTINGS.CLAIM.SEGMENT_MIN_WORDS:
             continue
-        if seg.confidence < SETTINGS.CLAIM_SEGMENT_MIN_CONFIDENCE:
+        if seg.confidence < SETTINGS.CLAIM.SEGMENT_MIN_CONFIDENCE:
             continue
         filtered.append(seg)
     return filtered
 
 
 def _format_transcript(segments: list[TranscriptSegment]) -> str:
-    """Format transcript segments into a readable speaker-attributed text.
-
-    Args:
-        segments: Speaker-diarized transcript segments.
-
-    Returns:
-        str: Formatted transcript text.
-    """
+    """Format transcript segments into readable speaker-attributed text."""
     lines: list[str] = []
     for seg in segments:
         timestamp = f"[{seg.start:.1f}s - {seg.end:.1f}s]"
@@ -317,18 +297,10 @@ def _parse_claims(
 def _find_segment_timing(
     claim_text: str, speaker: int, segments: list[TranscriptSegment],
 ) -> tuple[float, float]:
-    """Find the best matching segment's timing for a claim.
+    """Find the best matching segment's (start, end) timing for a claim.
 
     Prioritises segments from the same speaker, falling back to
     any segment containing relevant text.
-
-    Args:
-        claim_text: The claim text to match.
-        speaker: The speaker who made the claim.
-        segments: All transcript segments.
-
-    Returns:
-        tuple[float, float]: (start, end) timestamps in seconds.
     """
     claim_words = set(claim_text.lower().split())
 

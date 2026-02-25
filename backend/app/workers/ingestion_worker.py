@@ -6,8 +6,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.logger import setup_logger
 from app.core.kafka.topics import (
-    EventType, FileUploadedEvent, AuditEvent, AUDIT_EVENTS, utcnow,
+    FileUploadedEvent, AuditEvent, AUDIT_EVENTS, parse_file_event,
 )
+from app.core.utils import utcnow_aware
 from app.core.storage.local import LocalFileStore
 from app.core.rag.ingest import ingest_document, prepare_document, batch_embed_and_store
 from app.core.rag.embedding import get_embedder
@@ -35,22 +36,16 @@ class IngestionWorker(BaseWorker):
     - Pipeline failure → mark failed + DLQ
     """
 
+    batch_mode = True
+
     async def handle_batch(self, events: list[dict], db: AsyncSession) -> None:
-        """Process a batch of events from the file.events topic.
-
-        Filters for file.uploaded events, parses+chunks each document,
-        then embeds all chunks in a single API call.
-
-        Args:
-            events: List of deserialized JSON event payloads.
-            db: Database session (scoped to this batch).
-        """
-        # 1. Filter and validate events
+        """Process a batch of file.uploaded events: parse, chunk, then batch-embed."""
+        # 1. Filter and validate events via discriminated union
         upload_events: list[FileUploadedEvent] = []
         for event in events:
-            if event.get("event_type") != EventType.FILE_UPLOADED:
-                continue
-            upload_events.append(FileUploadedEvent(**event))
+            parsed = parse_file_event(event)
+            if isinstance(parsed, FileUploadedEvent):
+                upload_events.append(parsed)
 
         if not upload_events:
             return
@@ -126,22 +121,14 @@ class IngestionWorker(BaseWorker):
                     doc_id=doc_id,
                     user_id=parsed_event.uploaded_by,
                     payload={"chunk_count": chunk_count, "filename": parsed_event.original_filename},
-                    timestamp=utcnow(),
+                    timestamp=utcnow_aware(),
                 ),
             )
 
         logger.info(f"Batch ingestion complete: {len(results)}/{len(prepared_docs)} docs")
 
     async def handle_event(self, event: dict, db: AsyncSession) -> None:
-        """Fallback single-event handler (used by BaseWorker._dispatch).
-
-        For backwards compatibility, delegates to handle_batch with a
-        single-element list.
-
-        Args:
-            event: Deserialized JSON event payload.
-            db: Database session.
-        """
+        """Fallback single-event handler — delegates to handle_batch."""
         await self.handle_batch([event], db)
 
 
@@ -150,41 +137,19 @@ class IngestionWorker(BaseWorker):
 # ---------------------------------------------------------------------------
 
 async def _get_document(db: AsyncSession, doc_id: UUID) -> Document | None:
-    """Fetch a document by ID.
-
-    Args:
-        db: Database session.
-        doc_id: The document ID.
-
-    Returns:
-        Document or None if not found.
-    """
+    """Fetch a document by ID, or None if not found."""
     result = await db.execute(select(Document).where(Document.id == doc_id))
     return result.scalars().first()
 
 
 async def _get_vault(db: AsyncSession, vault_id: UUID) -> Vault | None:
-    """Fetch a vault by ID.
-
-    Args:
-        db: Database session.
-        vault_id: The vault ID.
-
-    Returns:
-        Vault or None if not found.
-    """
+    """Fetch a vault by ID, or None if not found."""
     result = await db.execute(select(Vault).where(Vault.id == vault_id))
     return result.scalars().first()
 
 
 async def _mark_failed(db: AsyncSession, doc: Document, error_message: str) -> None:
-    """Mark a document as failed with an error message.
-
-    Args:
-        db: Database session.
-        doc: The document to update.
-        error_message: Description of what went wrong.
-    """
+    """Mark a document as failed with an error message."""
     doc.status = "failed"
     doc.error_message = error_message
     db.add(doc)

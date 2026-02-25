@@ -18,12 +18,7 @@ class AuditWorker(BaseWorker):
     """
 
     async def handle_event(self, event: dict, db: AsyncSession) -> None:
-        """Insert an audit event into the audit_log table.
-
-        Args:
-            event: Deserialized JSON event payload.
-            db: Database session (scoped to this event).
-        """
+        """Insert an audit event into the audit_log table."""
         parsed = AuditEvent(**event)
 
         record = AuditLog(

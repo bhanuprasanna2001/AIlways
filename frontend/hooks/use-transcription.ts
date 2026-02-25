@@ -262,6 +262,15 @@ export function useTranscription() {
       const audioCtx = new AudioContext({ sampleRate: 16000 });
       audioCtxRef.current = audioCtx;
 
+      // Ensure context is running — the original button-click gesture
+      // may have expired after the preceding awaits (ticket fetch,
+      // getUserMedia / getDisplayMedia).  Chrome's autoplay policy can
+      // leave a new AudioContext in "suspended" state when no recent
+      // user interaction is detected.
+      if (audioCtx.state === "suspended") {
+        await audioCtx.resume();
+      }
+
       await audioCtx.audioWorklet.addModule("/vad-processor.js");
 
       const micSource = audioCtx.createMediaStreamSource(micStream);
@@ -280,9 +289,16 @@ export function useTranscription() {
         });
         merger.connect(workletNode);
       } else {
-        // Mic-only mode (original path)
-        channels = 1; // reset in case getDisplayMedia failed
-        workletNode = new AudioWorkletNode(audioCtx, "vad-processor");
+        // Mic-only mode — explicit mono to prevent the Web Audio API
+        // from upmixing the single-channel mic into stereo.  The
+        // AudioWorkletNode default is channelCount:2 / mode:"max",
+        // which silently doubles every sample and sends garbled
+        // interleaved stereo to Deepgram on a channels=1 stream.
+        channels = 1;
+        workletNode = new AudioWorkletNode(audioCtx, "vad-processor", {
+          channelCount: 1,
+          channelCountMode: "explicit",
+        });
         micSource.connect(workletNode);
       }
 

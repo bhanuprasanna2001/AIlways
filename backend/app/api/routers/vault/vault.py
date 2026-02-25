@@ -2,16 +2,18 @@ from uuid import UUID
 from datetime import datetime
 from sqlmodel import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from app.db import get_db
 from app.db.models import User, Vault, VaultMember, Document
-from app.db.models.utils import _utcnow_naive
+from app.core.utils import utcnow
+from app.core.config import get_settings
 from app.core.auth.deps import get_current_user, require_csrf, require_vault_member
 from app.api.routers.vault.schemas import VaultCreate, VaultUpdate, VaultResponse
 
 
 router = APIRouter(prefix="/vaults", tags=["vaults"])
+SETTINGS = get_settings()
 
 
 # ---------------------------------------------------------------------------
@@ -19,20 +21,10 @@ router = APIRouter(prefix="/vaults", tags=["vaults"])
 # ---------------------------------------------------------------------------
 
 async def _vault_response(vault: Vault, role: str, db: AsyncSession) -> VaultResponse:
-    """Build a VaultResponse with the document count.
+    """Build a VaultResponse with document count and effective updated_at.
 
     Computes an effective ``updated_at`` as the latest of the vault's own
-    timestamp and the most recently modified document.  This serves as a
-    safety net so that "Latest Activity" stays accurate even if a
-    write-time vault-touch was missed.
-
-    Args:
-        vault: The vault model instance.
-        role: The caller's role in this vault.
-        db: The database session.
-
-    Returns:
-        VaultResponse: The serialized vault with doc count.
+    timestamp and the most recently modified document.
     """
     result = await db.execute(
         select(
@@ -74,16 +66,7 @@ async def create_vault(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new vault. The caller becomes the owner.
-
-    Args:
-        body: Vault creation payload.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        VaultResponse: The created vault.
-    """
+    """Create a new vault. The caller becomes the owner."""
     vault = Vault(owner_id=current_user.id, name=body.name, description=body.description)
     db.add(vault)
     await db.flush()
@@ -98,26 +81,35 @@ async def create_vault(
 
 @router.get("", summary="List vaults the current user is a member of")
 async def list_vaults(
+    response: Response,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=None, ge=1),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all vaults where the current user holds membership.
+    """List all vaults where the current user holds membership."""
+    effective_limit = min(limit, SETTINGS.PAGINATION_MAX_LIMIT) if limit else SETTINGS.PAGINATION_MAX_LIMIT
 
-    Args:
-        current_user: The authenticated user.
-        db: The database session.
+    where_clause = [
+        VaultMember.user_id == current_user.id,
+        Vault.is_active == True,
+        Vault.deleted_at == None,
+    ]
 
-    Returns:
-        list[VaultResponse]: List of vaults.
-    """
+    total = (await db.execute(
+        select(func.count())
+        .select_from(Vault)
+        .join(VaultMember, VaultMember.vault_id == Vault.id)
+        .where(*where_clause)
+    )).scalar() or 0
+    response.headers["X-Total-Count"] = str(total)
+
     result = await db.execute(
         select(Vault, VaultMember.role)
         .join(VaultMember, VaultMember.vault_id == Vault.id)
-        .where(
-            VaultMember.user_id == current_user.id,
-            Vault.is_active == True,
-            Vault.deleted_at == None,
-        )
+        .where(*where_clause)
+        .offset(skip)
+        .limit(effective_limit)
     )
     rows = result.all()
     return [await _vault_response(vault, role, db) for vault, role in rows]
@@ -129,16 +121,7 @@ async def get_vault(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get details for a single vault.
-
-    Args:
-        vault_id: The vault identifier.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        VaultResponse: The vault details.
-    """
+    """Get details for a single vault."""
     vault, member = await require_vault_member(vault_id, current_user, db)
     return await _vault_response(vault, member.role, db)
 
@@ -150,17 +133,7 @@ async def update_vault(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update vault name or description. Requires editor or owner role.
-
-    Args:
-        vault_id: The vault identifier.
-        body: Fields to update.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        VaultResponse: The updated vault.
-    """
+    """Update vault name or description. Requires editor or owner role."""
     vault, member = await require_vault_member(vault_id, current_user, db, min_role="editor")
 
     if body.name is not None:
@@ -168,7 +141,7 @@ async def update_vault(
     if body.description is not None:
         vault.description = body.description
 
-    vault.updated_at = _utcnow_naive()
+    vault.updated_at = utcnow()
 
     db.add(vault)
     await db.commit()
@@ -183,20 +156,11 @@ async def delete_vault(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Soft-delete a vault. Only the owner can do this.
-
-    Args:
-        vault_id: The vault identifier.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        dict: Success message.
-    """
+    """Soft-delete a vault. Only the owner can do this."""
     vault, _ = await require_vault_member(vault_id, current_user, db, min_role="owner")
 
     vault.is_active = False
-    vault.deleted_at = _utcnow_naive()
+    vault.deleted_at = utcnow()
 
     db.add(vault)
     await db.commit()

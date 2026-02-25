@@ -2,19 +2,20 @@ import hashlib
 from uuid import UUID
 
 from sqlmodel import select, func
-from sqlalchemy import delete as sqlalchemy_delete
+from sqlalchemy import delete as sqlalchemy_delete, text, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile, File, status
 from fastapi.responses import JSONResponse
 
 from app.db import get_db
 from app.db.models import User, Document, Chunk
-from app.db.models.utils import _utcnow_naive, touch_vault_updated_at
+from app.db.models.utils import touch_vault_updated_at
 from app.core.config import get_settings
+from app.core.utils import utcnow, utcnow_aware
 from app.core.auth.deps import get_current_user, require_csrf, require_vault_member
 from app.core.storage.local import LocalFileStore
 from app.core.kafka.producer import KafkaProducer, KafkaProducerError
-from app.core.kafka.topics import FILE_EVENTS, FileUploadedEvent, FileDeletedEvent, utcnow
+from app.core.kafka.topics import FILE_EVENTS, FileUploadedEvent, FileDeletedEvent
 from app.core.logger import setup_logger
 
 from app.api.routers.documents.schemas import DocumentResponse, UploadResponse, StatusResponse, ContentResponse
@@ -32,14 +33,7 @@ _file_store = LocalFileStore(SETTINGS.FILE_STORE_PATH)
 # ---------------------------------------------------------------------------
 
 def _get_producer(request: Request) -> KafkaProducer | None:
-    """Get the Kafka producer from app state, if available.
-
-    Args:
-        request: The incoming HTTP request.
-
-    Returns:
-        KafkaProducer or None if Kafka is disabled/unavailable.
-    """
+    """Get the Kafka producer from app state, or None if unavailable."""
     producer = getattr(request.app.state, "kafka_producer", None)
     if producer and producer.is_connected and SETTINGS.KAFKA_ENABLED:
         return producer
@@ -62,16 +56,6 @@ async def upload_document(
 
     When Kafka is available: saves file, produces event, returns 202 Accepted.
     When Kafka is disabled: runs synchronous ingestion (Phase 1 fallback).
-
-    Args:
-        vault_id: The vault to upload into.
-        request: The HTTP request (for accessing app state).
-        file: The uploaded file.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        UploadResponse: Document ID, filename, status, and chunk count.
     """
     vault, _ = await require_vault_member(vault_id, current_user, db, min_role="editor")
 
@@ -96,8 +80,11 @@ async def upload_document(
             detail=f"File exceeds {SETTINGS.MAX_FILE_SIZE_MB}MB limit",
         )
 
-    # Check for duplicate
+    # Check for duplicate — advisory lock serialises concurrent uploads of the same file
     file_hash = hashlib.sha256(content).hexdigest()
+    lock_key = int(hashlib.md5(f"{vault_id}:{file_hash}".encode()).hexdigest()[:15], 16)
+    await db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
+
     existing = await db.execute(
         select(Document).where(
             Document.vault_id == vault_id,
@@ -141,12 +128,27 @@ async def upload_document(
         status="pending",
     )
     db.add(doc)
-    await db.flush()
 
-    # Touch vault timestamp so "Latest Activity" reflects the upload
-    await touch_vault_updated_at(db, vault_id)
+    try:
+        await db.flush()
+        # Touch vault timestamp so "Latest Activity" reflects the upload
+        await touch_vault_updated_at(db, vault_id)
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        # Clean up the orphan file written before the DB commit
+        try:
+            await _file_store.delete(storage_path)
+        except Exception:
+            logger.warning(f"Failed to clean up orphan file: {storage_path}")
+        # Race condition: another concurrent upload committed the same hash
+        if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This file already exists in the vault (concurrent upload)",
+            )
+        raise
 
-    await db.commit()
     await db.refresh(doc)
 
     # --- Async path (Kafka available) ---
@@ -159,7 +161,7 @@ async def upload_document(
             storage_path=storage_path,
             original_filename=file.filename,
             uploaded_by=current_user.id,
-            timestamp=utcnow(),
+            timestamp=utcnow_aware(),
         )
         try:
             await producer.send_event(FILE_EVENTS, event, key=str(vault_id))
@@ -211,30 +213,34 @@ async def upload_document(
 @router.get("", summary="List documents in a vault")
 async def list_documents(
     vault_id: UUID,
+    response: Response,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=None, ge=1),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all non-deleted documents in the vault.
-
-    Args:
-        vault_id: The vault identifier.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        list[DocumentResponse]: List of documents.
-    """
+    """List non-deleted documents in the vault with optional pagination."""
     await require_vault_member(vault_id, current_user, db)
+    effective_limit = min(limit, SETTINGS.PAGINATION_MAX_LIMIT) if limit else SETTINGS.PAGINATION_MAX_LIMIT
+
+    where_clause = [
+        Document.vault_id == vault_id,
+        Document.deleted_at == None,
+    ]
+
+    total = (await db.execute(
+        select(func.count()).select_from(Document).where(*where_clause)
+    )).scalar() or 0
+    response.headers["X-Total-Count"] = str(total)
 
     result = await db.execute(
-        select(Document).where(
-            Document.vault_id == vault_id,
-            Document.deleted_at == None,
-        )
+        select(Document).where(*where_clause)
+        .offset(skip)
+        .limit(effective_limit)
     )
     documents = result.scalars().all()
 
-    return [DocumentResponse.from_model(doc) for doc in documents]
+    return [DocumentResponse.model_validate(doc) for doc in documents]
 
 
 @router.get("/{doc_id}", summary="Get document details")
@@ -244,17 +250,7 @@ async def get_document(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get details for a single document.
-
-    Args:
-        vault_id: The vault identifier.
-        doc_id: The document identifier.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        DocumentResponse: The document details.
-    """
+    """Get details for a single document."""
     await require_vault_member(vault_id, current_user, db)
 
     result = await db.execute(
@@ -268,7 +264,7 @@ async def get_document(
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    return DocumentResponse.from_model(doc)
+    return DocumentResponse.model_validate(doc)
 
 
 @router.get("/{doc_id}/status", summary="Poll document ingestion status")
@@ -278,17 +274,7 @@ async def get_document_status(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Poll the current ingestion status of a document.
-
-    Args:
-        vault_id: The vault identifier.
-        doc_id: The document identifier.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        StatusResponse: Current status and error info.
-    """
+    """Poll the current ingestion status of a document."""
     await require_vault_member(vault_id, current_user, db)
 
     result = await db.execute(
@@ -319,17 +305,7 @@ async def get_document_content(
     """Read the raw file from storage, re-parse it to markdown, and return.
 
     Only active documents can have their content read. The raw file is
-    parsed on-demand using the same pipeline that produced the chunks —
-    this keeps storage simple (no extra parsed-markdown file on disk).
-
-    Args:
-        vault_id: The vault identifier.
-        doc_id: The document identifier.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        ContentResponse: Parsed markdown, filename, file type.
+    parsed on-demand using the same pipeline that produced the chunks.
     """
     await require_vault_member(vault_id, current_user, db)
 
@@ -394,16 +370,6 @@ async def delete_document(
 
     When Kafka is available: sets status to pending_delete, produces event.
     When Kafka is disabled: performs synchronous soft-delete.
-
-    Args:
-        vault_id: The vault identifier.
-        doc_id: The document identifier.
-        request: The HTTP request.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        dict: Success message.
     """
     await require_vault_member(vault_id, current_user, db, min_role="editor")
 
@@ -418,7 +384,7 @@ async def delete_document(
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    now = _utcnow_naive()
+    now = utcnow()
 
     # --- Async path (Kafka available) ---
     producer = _get_producer(request)
@@ -436,7 +402,7 @@ async def delete_document(
             doc_id=doc_id,
             vault_id=vault_id,
             deleted_by=current_user.id,
-            timestamp=utcnow(),
+            timestamp=utcnow_aware(),
         )
         await producer.send_event(FILE_EVENTS, event, key=str(vault_id))
         return {"message": "Document deletion queued"}
@@ -447,12 +413,11 @@ async def delete_document(
     doc.updated_at = now
     db.add(doc)
 
-    result = await db.execute(
-        select(Chunk).where(Chunk.doc_id == doc_id, Chunk.is_deleted == False)
+    await db.execute(
+        sa_update(Chunk)
+        .where(Chunk.doc_id == doc_id, Chunk.is_deleted == False)
+        .values(is_deleted=True)
     )
-    for chunk in result.scalars().all():
-        chunk.is_deleted = True
-        db.add(chunk)
 
     # Touch vault timestamp so "Latest Activity" reflects the deletion
     await touch_vault_updated_at(db, vault_id)
@@ -470,17 +435,7 @@ async def parse_document(
 ):
     """Parse a file and return the extracted markdown without storing anything.
 
-    Useful for previewing parser output before uploading. No database
-    records or storage side-effects are created.
-
-    Args:
-        vault_id: The vault context (used for auth check only).
-        file: The file to parse.
-        current_user: The authenticated user.
-        db: The database session.
-
-    Returns:
-        dict: Parsed markdown text, character count, and filename.
+    Useful for previewing parser output before uploading.
     """
     await require_vault_member(vault_id, current_user, db)
 

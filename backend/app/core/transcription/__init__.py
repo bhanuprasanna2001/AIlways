@@ -20,33 +20,24 @@ from app.core.transcription.deepgram import DeepgramTranscriber
 from app.core.transcription.exceptions import TranscriptionError
 from app.core.config import get_settings
 from app.core.logger import setup_logger
+from app.core.utils import singleton
 
 logger = setup_logger(__name__)
 
-_transcriber: Transcriber | None = None
 
-
+@singleton
 def get_transcriber() -> Transcriber:
-    """Return the shared transcriber instance.
-
-    Lazily initialised on first call.
-
-    Returns:
-        Transcriber: Configured DeepGram transcriber instance.
-    """
-    global _transcriber
-    if _transcriber is None:
-        settings = get_settings()
-        _transcriber = DeepgramTranscriber(
-            api_key=settings.DEEPGRAM_API_KEY,
-            model=settings.DEEPGRAM_MODEL,
-            language=settings.DEEPGRAM_LANGUAGE,
-        )
-        logger.info(
-            f"Initialised transcriber: model={settings.DEEPGRAM_MODEL}, "
-            f"language={settings.DEEPGRAM_LANGUAGE}",
-        )
-    return _transcriber
+    """Return the shared transcriber instance (lazily initialised)."""
+    settings = get_settings()
+    logger.info(
+        f"Initialised transcriber: model={settings.DEEPGRAM_MODEL}, "
+        f"language={settings.DEEPGRAM_LANGUAGE}",
+    )
+    return DeepgramTranscriber(
+        api_key=settings.DEEPGRAM_API_KEY,
+        model=settings.DEEPGRAM_MODEL,
+        language=settings.DEEPGRAM_LANGUAGE,
+    )
 
 
 __all__ = [

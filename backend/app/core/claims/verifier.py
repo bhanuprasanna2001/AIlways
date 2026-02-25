@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from uuid import UUID
@@ -16,7 +17,8 @@ from app.core.claims.base import Claim, ClaimVerdict, Evidence
 from app.core.claims.exceptions import ClaimVerificationError
 from app.core.rag.embedding import get_embedder
 from app.core.rag.retrieval import hybrid_search
-from app.core.rag.retrieval.base import SearchResult
+from app.core.rag.retrieval.base import SearchResult, build_retrieval_context
+from app.core.utils import normalize_numbers
 from app.core.config import get_settings
 from app.core.logger import setup_logger
 
@@ -144,7 +146,7 @@ class RAGClaimVerifier:
 
             # Normalize: collapse thousand-separator commas in numbers
             # so that "10,248" → "10248" matches document text.
-            search_text = _normalize_numbers(search_text)
+            search_text = normalize_numbers(search_text)
 
             # Extract entity identifiers (invoice/order numbers) and
             # prepend them to boost targeted retrieval.  Without this,
@@ -184,7 +186,7 @@ class RAGClaimVerifier:
                 vault_id=vault_id,
                 db=db,
                 top_k=self._top_k,
-                mmr_lambda=SETTINGS.CLAIM_VERIFICATION_MMR_LAMBDA,
+                mmr_lambda=SETTINGS.CLAIM.VERIFICATION_MMR_LAMBDA,
             )
 
             # Merge: exact-ID hits first, then hybrid (deduplicated)
@@ -284,18 +286,28 @@ class RAGClaimVerifier:
         Returns:
             ClaimVerdict: Parsed verification result.
         """
-        context = _build_context(results)
-        # Normalize numbers in the claim text sent to the LLM so that
-        # "10,248" matches "10248" in the document context.
-        normalized_claim = _normalize_numbers(claim.text)
+        context = build_retrieval_context(results)
+        normalized_claim = normalize_numbers(claim.text)
         user_message = _USER_TEMPLATE.format(claim=normalized_claim, context=context)
 
         try:
-            response = await self._llm.ainvoke([
-                SystemMessage(content=_SYSTEM_PROMPT),
-                HumanMessage(content=user_message),
-            ])
+            response = await asyncio.wait_for(
+                self._llm.ainvoke([
+                    SystemMessage(content=_SYSTEM_PROMPT),
+                    HumanMessage(content=user_message),
+                ]),
+                timeout=SETTINGS.API_TIMEOUT_S,
+            )
             return _parse_verdict(response.content, claim)
+        except asyncio.TimeoutError:
+            logger.error(f"LLM verification timed out for: {claim.text[:50]}...")
+            return ClaimVerdict(
+                claim_id=claim.id,
+                claim_text=claim.text,
+                verdict="unverifiable",
+                confidence=0.0,
+                explanation="Verification timed out.",
+            )
         except Exception as e:
             logger.error(f"LLM verification failed: {e}")
             return ClaimVerdict(
@@ -311,48 +323,9 @@ class RAGClaimVerifier:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _normalize_numbers(text: str) -> str:
-    """Collapse thousand-separator commas in numeric strings.
-
-    DeepGram's ``smart_format`` option inserts commas into numbers
-    (e.g. ``10,248``), but documents store plain numbers (``10248``).
-    This helper strips those commas so that embeddings and BM25
-    match the document text.
-
-    Examples:
-        >>> _normalize_numbers("invoice 10,248 total $1,500.00")
-        'invoice 10248 total $1500.00'
-    """
-    return re.sub(r"(\d),(\d)", r"\1\2", text)
-
-
-def _build_context(results: list[SearchResult]) -> str:
-    """Build context string from search results for the verification prompt.
-
-    Args:
-        results: Retrieved chunks from hybrid search.
-
-    Returns:
-        str: Formatted context for the LLM.
-    """
-    parts: list[str] = []
-    for i, r in enumerate(results, 1):
-        parts.append(f"--- Document Chunk {i} (relevance: {r.score:.3f}) ---")
-        parts.append(r.content_with_header)
-        parts.append("")
-    return "\n".join(parts)
-
 
 def _parse_verdict(raw: str, claim: Claim) -> ClaimVerdict:
-    """Parse the LLM JSON response into a ClaimVerdict.
-
-    Args:
-        raw: Raw JSON string from the LLM.
-        claim: The original claim for ID/text reference.
-
-    Returns:
-        ClaimVerdict: Parsed verdict, or unverifiable if parsing fails.
-    """
+    """Parse the LLM JSON response into a ClaimVerdict."""
     try:
         data = json.loads(raw)
 

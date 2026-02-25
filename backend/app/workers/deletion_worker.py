@@ -3,10 +3,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logger import setup_logger
 from app.core.kafka.topics import (
-    EventType, FileDeletedEvent, AuditEvent, AUDIT_EVENTS, utcnow,
+    FileDeletedEvent, AuditEvent, AUDIT_EVENTS, parse_file_event,
 )
+from app.core.utils import utcnow, utcnow_aware
 from app.db.models import Document, Chunk
-from app.db.models.utils import _utcnow_naive, touch_vault_updated_at
+from app.db.models.utils import touch_vault_updated_at
 from app.workers.base import BaseWorker
 
 logger = setup_logger(__name__)
@@ -22,19 +23,11 @@ class DeletionWorker(BaseWorker):
     """
 
     async def handle_event(self, event: dict, db: AsyncSession) -> None:
-        """Process a single event from the file.events topic.
-
-        Only handles file.deleted events.
-
-        Args:
-            event: Deserialized JSON event payload.
-            db: Database session (scoped to this event).
-        """
-        event_type = event.get("event_type")
-        if event_type != EventType.FILE_DELETED:
+        """Process a single file.deleted event."""
+        parsed = parse_file_event(event)
+        if not isinstance(parsed, FileDeletedEvent):
             return
 
-        parsed = FileDeletedEvent(**event)
         doc_id = parsed.doc_id
 
         logger.info(f"Processing deletion for document {doc_id}")
@@ -53,21 +46,20 @@ class DeletionWorker(BaseWorker):
             return
 
         # 3. Soft-delete the document
-        now = _utcnow_naive()
+        now = utcnow()
         doc.status = "deleted"
         doc.deleted_at = now
         doc.updated_at = now
         db.add(doc)
 
-        # 4. Mark all chunks as deleted
-        chunk_result = await db.execute(
-            select(Chunk).where(Chunk.doc_id == doc_id, Chunk.is_deleted == False)
+        # 4. Mark all chunks as deleted (bulk update)
+        from sqlalchemy import update as sa_update
+        chunk_count_result = await db.execute(
+            sa_update(Chunk)
+            .where(Chunk.doc_id == doc_id, Chunk.is_deleted == False)
+            .values(is_deleted=True)
         )
-        chunks = chunk_result.scalars().all()
-        chunk_count = len(chunks)
-        for chunk in chunks:
-            chunk.is_deleted = True
-            db.add(chunk)
+        chunk_count = chunk_count_result.rowcount
 
         # 5. Touch vault so "Latest Activity" reflects the deletion
         await touch_vault_updated_at(db, parsed.vault_id)
@@ -84,6 +76,6 @@ class DeletionWorker(BaseWorker):
                 doc_id=doc_id,
                 user_id=parsed.deleted_by,
                 payload={"chunks_deleted": chunk_count},
-                timestamp=utcnow(),
+                timestamp=utcnow_aware(),
             ),
         )

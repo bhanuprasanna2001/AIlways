@@ -4,6 +4,61 @@ from pydantic import computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# ---------------------------------------------------------------------------
+# Nested sub-configs — each reads env vars matching its prefix
+# ---------------------------------------------------------------------------
+
+class ClaimConfig(BaseSettings):
+    """Claim detection & verification settings."""
+    model_config = SettingsConfigDict(env_prefix="CLAIM_", env_file=".env", extra="ignore")
+
+    DETECTION_ENABLED: bool = True
+    BATCH_INTERVAL_S: float = 6.0
+    VERIFICATION_TOP_K: int = 5
+    CONTEXT_SEGMENTS: int = 10
+    FLUSH_INTERVAL_S: float = 1.0
+    IDLE_TIMEOUT_S: float = 2.0
+    MAX_BUFFER_SEGMENTS: int = 100
+    MIN_SEGMENTS: int = 1
+    MIN_CHARS: int = 20
+    DEDUP_THRESHOLD: float = 0.8
+    SEGMENT_MIN_WORDS: int = 3
+    SEGMENT_MIN_CONFIDENCE: float = 0.5
+    GROQ_MAX_RETRIES: int = 3
+    DRAIN_TIMEOUT_S: float = 3.0
+    TASK_TIMEOUT_S: float = 15.0
+    MAX_CONCURRENT_TASKS: int = 5
+    VERIFICATION_MMR_LAMBDA: float = 1.0
+    EXTRACT_FROM_QUESTIONS: bool = True
+
+
+class TranscriptionConfig(BaseSettings):
+    """Transcription session & audio settings."""
+    model_config = SettingsConfigDict(env_prefix="TRANSCRIPTION_", env_file=".env", extra="ignore")
+
+    SESSION_STALE_TIMEOUT_MINUTES: int = 30
+    STALE_CLEANUP_INTERVAL_MINUTES: int = 30
+    DB_FLUSH_INTERVAL_S: float = 2.0
+    DB_FLUSH_BATCH_SIZE: int = 50
+    MAX_SESSION_DURATION_S: int = 14400
+    SESSION_TITLE_MAX_LENGTH: int = 255
+    WS_TICKET_TTL_S: int = 60
+    MAX_AUDIO_SIZE_MB: int = 100
+
+
+class WorkerConfig(BaseSettings):
+    """Kafka worker tuning."""
+    model_config = SettingsConfigDict(env_prefix="WORKER_", env_file=".env", extra="ignore")
+
+    INGESTION_BATCH_SIZE: int = 20
+    INGESTION_BATCH_TIMEOUT_S: float = 2.0
+    INGESTION_CONCURRENCY: int = 5
+
+
+# ---------------------------------------------------------------------------
+# Root settings
+# ---------------------------------------------------------------------------
+
 class Settings(BaseSettings):
     
     # General
@@ -56,32 +111,12 @@ class Settings(BaseSettings):
     DEEPGRAM_API_KEY: str = ""
     DEEPGRAM_MODEL: str = "nova-3"
     DEEPGRAM_LANGUAGE: str = "en"
-    DEEPGRAM_UTTERANCE_END_MS: int = 1000
+    DEEPGRAM_ENDPOINTING_MS: int = 500
     DEEPGRAM_DIARIZE: bool = True
 
     # Groq (fast LLM for claim detection)
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
-
-    # Transcription / Claims pipeline
-    CLAIM_DETECTION_ENABLED: bool = True
-    CLAIM_BATCH_INTERVAL_S: float = 6.0
-    CLAIM_VERIFICATION_TOP_K: int = 5
-    CLAIM_CONTEXT_SEGMENTS: int = 10
-    CLAIM_FLUSH_INTERVAL_S: float = 1.0
-    CLAIM_IDLE_TIMEOUT_S: float = 2.0
-    CLAIM_MAX_BUFFER_SEGMENTS: int = 100
-    CLAIM_MIN_SEGMENTS: int = 1
-    CLAIM_MIN_CHARS: int = 20
-    CLAIM_DEDUP_THRESHOLD: float = 0.8
-    CLAIM_SEGMENT_MIN_WORDS: int = 3
-    CLAIM_SEGMENT_MIN_CONFIDENCE: float = 0.5
-    CLAIM_GROQ_MAX_RETRIES: int = 3
-    CLAIM_DRAIN_TIMEOUT_S: float = 3.0
-    CLAIM_TASK_TIMEOUT_S: float = 15.0
-    CLAIM_MAX_CONCURRENT_TASKS: int = 5
-    CLAIM_VERIFICATION_MMR_LAMBDA: float = 1.0
-    CLAIM_EXTRACT_FROM_QUESTIONS: bool = True
 
     # File Storage
     FILE_STORE_PATH: str = "./data/uploads"
@@ -105,19 +140,38 @@ class Settings(BaseSettings):
     KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS: int = 600000
     KAFKA_RECOVERY_INTERVAL_MINUTES: int = 5
 
-    # Transcription Sessions
-    TRANSCRIPTION_SESSION_STALE_TIMEOUT_MINUTES: int = 30
-    TRANSCRIPTION_DB_FLUSH_INTERVAL_S: float = 2.0
-    TRANSCRIPTION_DB_FLUSH_BATCH_SIZE: int = 50
-    TRANSCRIPTION_MAX_SESSION_DURATION_S: int = 14400
-    TRANSCRIPTION_SESSION_TITLE_MAX_LENGTH: int = 255
-    TRANSCRIPTION_WS_TICKET_TTL_S: int = 60
+    # Database pool
+    DB_POOL_SIZE: int = 10
+    DB_POOL_MAX_OVERFLOW: int = 20
+    DB_POOL_RECYCLE_S: int = 3600
+    DB_POOL_PRE_PING: bool = True
 
-    # Worker tuning
-    WORKER_INGESTION_BATCH_SIZE: int = 20
-    WORKER_INGESTION_BATCH_TIMEOUT_S: float = 2.0
-    WORKER_INGESTION_CONCURRENCY: int = 5
-    
+    # External API timeouts
+    API_TIMEOUT_S: float = 30.0
+    EMBEDDING_TIMEOUT_S: float = 60.0
+
+    # WebSocket
+    WS_HEARTBEAT_INTERVAL_S: float = 30.0
+    WS_RECEIVE_TIMEOUT_S: float = 300.0
+    MAX_CONCURRENT_TRANSCRIPTION_SESSIONS: int = 3
+
+    # Pagination
+    PAGINATION_DEFAULT_LIMIT: int = 50
+    PAGINATION_MAX_LIMIT: int = 200
+
+    # Sparse search
+    SPARSE_SEARCH_MAX_QUERY_LENGTH: int = 500
+
+    # PDF process pool
+    PDF_PARSE_WORKERS: int = 2
+
+    # Embedding cache (Redis-backed query dedup)
+    EMBEDDING_CACHE_TTL_S: float = 300.0
+
+    # Grouped sub-configs
+    CLAIM: ClaimConfig = ClaimConfig()
+    TRANSCRIPTION: TranscriptionConfig = TranscriptionConfig()
+    WORKER: WorkerConfig = WorkerConfig()
 
     @computed_field
     @property

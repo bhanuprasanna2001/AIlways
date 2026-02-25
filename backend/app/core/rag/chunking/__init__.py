@@ -15,32 +15,23 @@ from app.core.rag.chunking.base import Chunker, ChunkData
 from app.core.rag.chunking.recursive import RecursiveChunker
 from app.core.config import get_settings
 from app.core.logger import setup_logger
+from app.core.utils import singleton
 
 logger = setup_logger(__name__)
 
-_chunker: Chunker | None = None
 
-
+@singleton
 def get_chunker() -> Chunker:
-    """Return the shared chunker instance.
-
-    Lazily initialised on first call using settings from config.
-
-    Returns:
-        Chunker: Configured chunker instance.
-    """
-    global _chunker
-    if _chunker is None:
-        settings = get_settings()
-        _chunker = RecursiveChunker(
-            chunk_size=settings.RAG_CHUNK_SIZE,
-            chunk_overlap=settings.RAG_CHUNK_OVERLAP,
-        )
-        logger.info(
-            f"Initialised chunker: size={settings.RAG_CHUNK_SIZE}, "
-            f"overlap={settings.RAG_CHUNK_OVERLAP}",
-        )
-    return _chunker
+    """Return the shared chunker instance (lazily initialised)."""
+    settings = get_settings()
+    logger.info(
+        f"Initialised chunker: size={settings.RAG_CHUNK_SIZE}, "
+        f"overlap={settings.RAG_CHUNK_OVERLAP}",
+    )
+    return RecursiveChunker(
+        chunk_size=settings.RAG_CHUNK_SIZE,
+        chunk_overlap=settings.RAG_CHUNK_OVERLAP,
+    )
 
 
 __all__ = ["Chunker", "ChunkData", "RecursiveChunker", "get_chunker"]

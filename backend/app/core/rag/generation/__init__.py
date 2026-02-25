@@ -10,52 +10,34 @@ Usage::
     result = await generate_answer(query, search_results)
 """
 
+from collections.abc import AsyncIterator
+
 from app.core.rag.generation.base import Citation, AnswerResult, Generator
-from app.core.rag.generation.openai import OpenAIGenerator
+from app.core.rag.generation.openai import OpenAIGenerator, parse_response
 from app.core.config import get_settings
-from app.core.logger import setup_logger
-
-logger = setup_logger(__name__)
-
-_generator: Generator | None = None
+from app.core.utils import singleton
 
 
+@singleton
 def get_generator() -> Generator:
-    """Return the shared generator instance.
-
-    Lazily initialised on first call.
-
-    Returns:
-        Generator: Configured generator instance.
-    """
-    global _generator
-    if _generator is None:
-        settings = get_settings()
-        _generator = OpenAIGenerator(
-            model=settings.OPENAI_QUERY_MODEL,
-            temperature=settings.RAG_GENERATION_TEMPERATURE,
-            api_key=settings.OPENAI_API_KEY,
-        )
-    return _generator
+    """Return the shared generator instance (lazily initialised)."""
+    settings = get_settings()
+    return OpenAIGenerator(
+        model=settings.OPENAI_QUERY_MODEL,
+        temperature=settings.RAG_GENERATION_TEMPERATURE,
+        api_key=settings.OPENAI_API_KEY,
+    )
 
 
-async def generate_answer(
-    query: str,
-    results: list,
-) -> AnswerResult:
-    """Convenience function — generates a grounded answer.
+async def generate_answer(query: str, results: list) -> AnswerResult:
+    """Convenience wrapper — delegates to the shared generator."""
+    return await get_generator().generate(query, results)
 
-    Delegates to ``get_generator().generate(query, results)``.
 
-    Args:
-        query: The user's question.
-        results: Search results from the retrieval module.
-
-    Returns:
-        AnswerResult: Structured answer with citations and confidence.
-    """
-    gen = get_generator()
-    return await gen.generate(query, results)
+async def stream_answer(query: str, results: list) -> AsyncIterator[str]:
+    """Stream raw LLM tokens — delegates to the shared generator."""
+    async for token in get_generator().stream(query, results):
+        yield token
 
 
 __all__ = [
@@ -65,4 +47,6 @@ __all__ = [
     "OpenAIGenerator",
     "get_generator",
     "generate_answer",
+    "stream_answer",
+    "parse_response",
 ]

@@ -51,22 +51,14 @@ class KafkaProducer:
 
     @property
     def is_connected(self) -> bool:
-        """Whether the producer is started and connected.
-
-        Returns:
-            bool: True if connected.
-        """
+        """Whether the producer is started and connected."""
         return self._started
 
     async def send_event(self, topic: str, event: BaseModel, key: str | None = None) -> None:
         """Serialize and send a Pydantic event to a Kafka topic.
 
-        Uses send_and_wait for delivery confirmation before returning.
-
-        Args:
-            topic: The Kafka topic to produce to.
-            event: A Pydantic model to serialize as JSON.
-            key: Optional partition key (typically str(vault_id)).
+        Uses send_and_wait for delivery confirmation. The optional key
+        (typically ``str(vault_id)``) controls partition affinity.
 
         Raises:
             KafkaProducerError: If the produce fails.
