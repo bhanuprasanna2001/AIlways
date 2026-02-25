@@ -233,7 +233,7 @@ class DeepgramTranscriber:
                 "sample_rate": str(sample_rate),
                 "channels": str(channels),
                 "interim_results": "true",
-                "utterance_end_ms": str(SETTINGS.DEEPGRAM_UTTERANCE_END_MS),
+                "endpointing": str(SETTINGS.DEEPGRAM_ENDPOINTING_MS),
             }
             if multichannel:
                 options["multichannel"] = "true"

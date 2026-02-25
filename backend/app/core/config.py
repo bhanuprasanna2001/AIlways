@@ -111,7 +111,7 @@ class Settings(BaseSettings):
     DEEPGRAM_API_KEY: str = ""
     DEEPGRAM_MODEL: str = "nova-3"
     DEEPGRAM_LANGUAGE: str = "en"
-    DEEPGRAM_UTTERANCE_END_MS: int = 1000
+    DEEPGRAM_ENDPOINTING_MS: int = 500
     DEEPGRAM_DIARIZE: bool = True
 
     # Groq (fast LLM for claim detection)

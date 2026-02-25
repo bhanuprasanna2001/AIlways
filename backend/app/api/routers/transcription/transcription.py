@@ -246,7 +246,8 @@ async def live_transcribe(
                             continue
                         except asyncio.CancelledError:
                             return
-                        except Exception:
+                        except Exception as exc:
+                            logger.error(f"Unexpected receiver error: {exc}")
                             break
 
                         if segment is None:
