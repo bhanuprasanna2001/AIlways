@@ -13,8 +13,9 @@ from app.db.models import User
 from app.core.auth.deps import get_current_user, require_vault_member
 from app.core.config import get_settings
 from app.core.rag.embedding import get_embedder
-from app.core.rag.retrieval import hybrid_search
+from app.core.rag.retrieval import hybrid_search, entity_id_search
 from app.core.rag.generation import generate_answer, stream_answer, parse_response
+from app.core.rag.query import rewrite_query, extract_entity_ids
 from app.core.logger import setup_logger
 
 from app.api.routers.query.schemas import QueryRequest, QueryResponse
@@ -32,6 +33,7 @@ SETTINGS = get_settings()
 async def _sse_stream(
     query: str,
     results: list,
+    history_dicts: list[dict[str, str]] | None,
     start: float,
 ) -> AsyncIterator[str]:
     """Yield Server-Sent Events for a streaming query response.
@@ -46,7 +48,7 @@ async def _sse_stream(
 
     full_content = ""
     try:
-        async for token in stream_answer(query, results):
+        async for token in stream_answer(query, results, history=history_dicts):
             full_content += token
             yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
 
@@ -71,7 +73,12 @@ async def query_vault(
 ):
     """Query documents in a vault and receive a grounded, cited answer.
 
-    Pipeline: embed → hybrid search (dense + BM25 + RRF + MMR) → generate.
+    Pipeline:
+        1. Rewrite query (resolve pronouns/coreferences from history)
+        2. Extract entity IDs → exact SQL lookup
+        3. Embed → hybrid search (dense + BM25 + RRF + MMR)
+        4. Merge entity + hybrid results
+        5. Generate answer (with conversation history for continuity)
 
     When ``stream=true``, returns a ``text/event-stream`` response with
     token-by-token deltas followed by a final structured ``done`` event.
@@ -80,12 +87,32 @@ async def query_vault(
 
     start = time.monotonic()
 
-    # 1. Embed query
+    # Convert history to plain dicts for downstream modules
+    history_dicts: list[dict[str, str]] | None = None
+    if body.history:
+        history_dicts = [{"role": m.role, "content": m.content} for m in body.history]
+
+    # 1. Rewrite query — resolve pronouns and coreferences
+    #    "who are the customers of it?" → "who are the customers of invoice 10248?"
+    rewritten_query = await rewrite_query(body.query, history_dicts)
+    logger.info(
+        f"Query pipeline: original='{body.query[:60]}' "
+        f"rewritten='{rewritten_query[:60]}'"
+    )
+
+    # 2. Entity-aware retrieval — exact SQL lookup for referenced IDs
+    entity_ids = extract_entity_ids(rewritten_query)
+    exact_results = []
+    if entity_ids:
+        exact_results = await entity_id_search(entity_ids, vault_id, db)
+        logger.info(f"Entity search: IDs={entity_ids}, found={len(exact_results)} chunks")
+
+    # 3. Embed the rewritten query
     embedder = get_embedder()
     try:
         query_embedding = await asyncio.wait_for(
-            embedder.embed_query(body.query),
-            timeout=SETTINGS.API_TIMEOUT_S,
+            embedder.embed_query(rewritten_query),
+            timeout=SETTINGS.EMBEDDING_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
         raise HTTPException(
@@ -93,16 +120,28 @@ async def query_vault(
             detail="Query embedding timed out",
         )
 
-    # 2. Hybrid search (dense + sparse + RRF + MMR)
-    results = await hybrid_search(
-        query_text=body.query,
+    # 4. Hybrid search (dense + sparse + RRF + MMR)
+    hybrid_results = await hybrid_search(
+        query_text=rewritten_query,
         query_embedding=query_embedding,
         vault_id=vault_id,
         db=db,
         top_k=body.top_k,
     )
 
-    # 3. Generate answer
+    # 5. Merge: exact-ID hits first, then hybrid (deduplicated)
+    if exact_results:
+        seen_ids = {r.chunk_id for r in exact_results}
+        merged = list(exact_results)
+        for r in hybrid_results:
+            if r.chunk_id not in seen_ids:
+                merged.append(r)
+                seen_ids.add(r.chunk_id)
+        results = merged[: body.top_k + len(exact_results)]
+    else:
+        results = hybrid_results
+
+    # 6. Generate answer
     if not results:
         if stream:
             async def _empty_stream() -> AsyncIterator[str]:
@@ -116,14 +155,14 @@ async def query_vault(
     # Streaming path — SSE with token deltas + final structured event
     if stream:
         return StreamingResponse(
-            _sse_stream(body.query, results, start),
+            _sse_stream(rewritten_query, results, history_dicts, start),
             media_type="text/event-stream",
         )
 
     # Non-streaming path — full JSON response (default, backward-compatible)
     try:
         answer = await asyncio.wait_for(
-            generate_answer(body.query, results),
+            generate_answer(rewritten_query, results, history=history_dicts),
             timeout=SETTINGS.API_TIMEOUT_S,
         )
     except asyncio.TimeoutError:

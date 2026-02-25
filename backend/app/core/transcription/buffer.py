@@ -133,10 +133,13 @@ class TranscriptBuffer:
     # Entity tracking ---------------------------------------------------------
 
     def update_entities(self, text: str) -> None:
-        """Extract key entities from text and update the running summary.
+        """Extract key entities from text and merge into the running summary.
 
         Uses simple regex patterns to avoid an LLM call while providing
         enough context for claim resolution.
+
+        IMPORTANT: Merges new entities with existing ones instead of
+        overwriting, so previously mentioned entities are never lost.
         """
         entities: dict[str, set[str]] = {
             "invoice_numbers": set(),
@@ -144,6 +147,26 @@ class TranscriptBuffer:
             "amounts": set(),
         }
 
+        # Parse existing summary back into sets for merging
+        for line in self.entity_summary.split("\n"):
+            line = line.strip().lstrip("- ")
+            if line.startswith("Invoice Numbers:"):
+                for v in line.split(":", 1)[1].split(","):
+                    v = v.strip()
+                    if v:
+                        entities["invoice_numbers"].add(v)
+            elif line.startswith("Order Ids:"):
+                for v in line.split(":", 1)[1].split(","):
+                    v = v.strip()
+                    if v:
+                        entities["order_ids"].add(v)
+            elif line.startswith("Amounts:"):
+                for v in line.split(":", 1)[1].split(","):
+                    v = v.strip()
+                    if v:
+                        entities["amounts"].add(v)
+
+        # Extract new entities from text
         for match in re.finditer(
             r"(?:invoice|order|po|purchase\s*order)\s*(?:number|#|id|no\.?)?\s*:?\s*([A-Z]*-?\d{3,})",
             text, re.IGNORECASE,

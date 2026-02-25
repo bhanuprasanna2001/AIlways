@@ -29,14 +29,22 @@ def get_generator() -> Generator:
     )
 
 
-async def generate_answer(query: str, results: list) -> AnswerResult:
+async def generate_answer(
+    query: str,
+    results: list,
+    history: list[dict[str, str]] | None = None,
+) -> AnswerResult:
     """Convenience wrapper — delegates to the shared generator."""
-    return await get_generator().generate(query, results)
+    return await get_generator().generate(query, results, history=history)
 
 
-async def stream_answer(query: str, results: list) -> AsyncIterator[str]:
+async def stream_answer(
+    query: str,
+    results: list,
+    history: list[dict[str, str]] | None = None,
+) -> AsyncIterator[str]:
     """Stream raw LLM tokens — delegates to the shared generator."""
-    async for token in get_generator().stream(query, results):
+    async for token in get_generator().stream(query, results, history=history):
         yield token
 
 

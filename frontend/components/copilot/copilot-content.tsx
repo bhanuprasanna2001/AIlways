@@ -359,11 +359,19 @@ export default function CopilotContent() {
     abortRef.current = new AbortController();
 
     try {
+      // Build conversation history for the backend query rewriter.
+      // Send the last 10 turns (20 messages) so the rewriter can
+      // resolve pronouns and coreferences like "it", "that invoice", etc.
+      const historyForBackend = newMessages
+        .slice(-20)
+        .filter((m) => m.content.trim())
+        .map((m) => ({ role: m.role, content: m.content }));
+
       const response = await apiFetch<QueryResponse>(
         `/api/vaults/${selectedVaultId}/query`,
         {
           method: "POST",
-          body: { query: trimmed, top_k: 5 },
+          body: { query: trimmed, top_k: 5, history: historyForBackend },
           signal: abortRef.current.signal,
         },
       );

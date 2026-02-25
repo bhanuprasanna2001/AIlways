@@ -7,9 +7,30 @@ from app.core.rag.generation import Citation
 # Request / Response schemas
 # ---------------------------------------------------------------------------
 
+class HistoryMessage(BaseModel):
+    """A single message in the conversation history."""
+
+    role: str  # "user" or "assistant"
+    content: str
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v: str) -> str:
+        if v not in ("user", "assistant"):
+            raise ValueError("role must be 'user' or 'assistant'")
+        return v
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, v: str) -> str:
+        # Allow empty for assistant placeholders, but trim
+        return v.strip()
+
+
 class QueryRequest(BaseModel):
     query: str
     top_k: int = 5
+    history: list[HistoryMessage] = []
 
     @field_validator("query")
     @classmethod
@@ -26,6 +47,14 @@ class QueryRequest(BaseModel):
     def validate_top_k(cls, v: int) -> int:
         if v < 1 or v > 20:
             raise ValueError("top_k must be between 1 and 20")
+        return v
+
+    @field_validator("history")
+    @classmethod
+    def validate_history(cls, v: list) -> list:
+        # Limit history size to prevent abuse (max 50 messages)
+        if len(v) > 50:
+            v = v[-50:]
         return v
 
 

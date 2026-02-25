@@ -216,6 +216,7 @@ async def list_documents(
     response: Response,
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=None, ge=1),
+    search: str = Query(default=None, description="Filter by filename (case-insensitive substring match)"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -227,6 +228,9 @@ async def list_documents(
         Document.vault_id == vault_id,
         Document.deleted_at == None,
     ]
+
+    if search:
+        where_clause.append(Document.original_filename.ilike(f"%{search}%"))
 
     total = (await db.execute(
         select(func.count()).select_from(Document).where(*where_clause)

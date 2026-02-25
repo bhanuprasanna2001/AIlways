@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import useSWR, { mutate } from "swr";
 import {
@@ -32,6 +32,7 @@ import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Modal } from "@/components/ui/modal";
+import { Pagination, paginate } from "@/components/ui/pagination";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -247,6 +248,8 @@ export default function SessionsContent() {
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
+  const [page, setPage] = useState(1);
+  const ITEMS_PER_PAGE = 10;
 
   const filtered = useMemo(() => {
     if (!sessions) return [];
@@ -258,6 +261,16 @@ export default function SessionsContent() {
         s.vault_name.toLowerCase().includes(term),
     );
   }, [sessions, search]);
+
+  const { paged, totalPages } = useMemo(
+    () => paginate(filtered, page, ITEMS_PER_PAGE),
+    [filtered, page],
+  );
+
+  // Reset to page 1 when search changes
+  useEffect(() => {
+    setPage(1);
+  }, [search]);
 
   // ---- Detail view ----
   if (selectedSessionId) {
@@ -353,8 +366,9 @@ export default function SessionsContent() {
           No sessions match your search
         </p>
       ) : (
+        <>
         <div className="space-y-2">
-          {filtered.map((session) => (
+          {paged.map((session) => (
             <div
               key={session.id}
               className="group flex items-center justify-between rounded-xl border border-neutral-200 px-4 py-3 transition-colors hover:bg-neutral-50 dark:border-neutral-800 dark:hover:bg-neutral-800/30"
@@ -421,6 +435,8 @@ export default function SessionsContent() {
             </div>
           ))}
         </div>
+        <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
+        </>
       )}
 
       {/* Delete confirmation */}

@@ -11,12 +11,10 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sqlalchemy import text as sa_text
-
 from app.core.claims.base import Claim, ClaimVerdict, Evidence
 from app.core.claims.exceptions import ClaimVerificationError
 from app.core.rag.embedding import get_embedder
-from app.core.rag.retrieval import hybrid_search
+from app.core.rag.retrieval import hybrid_search, entity_id_search
 from app.core.rag.retrieval.base import SearchResult, build_retrieval_context
 from app.core.utils import normalize_numbers
 from app.core.config import get_settings
@@ -161,10 +159,11 @@ class RAGClaimVerifier:
             #    entity IDs (invoice/order numbers), do a direct SQL
             #    lookup first. Dense search fails when 800+ invoices
             #    share near-identical embeddings.
+            #    Uses shared entity_id_search from retrieval.entity.
             exact_results: list[SearchResult] = []
             if entity_ids:
-                exact_results = await self._exact_id_search(
-                    entity_ids, vault_id, db,
+                exact_results = await entity_id_search(
+                    entity_ids[:3], vault_id, db,
                 )
                 if exact_results:
                     logger.info(
@@ -220,59 +219,6 @@ class RAGClaimVerifier:
                 confidence=0.0,
                 explanation=f"Verification failed: {e}",
             )
-
-    async def _exact_id_search(
-        self,
-        entity_ids: list[str],
-        vault_id: UUID,
-        db: AsyncSession,
-    ) -> list[SearchResult]:
-        """Retrieve chunks whose content contains one of the entity IDs.
-
-        This bypasses embedding-based search entirely and does a direct
-        SQL ILIKE lookup.  It is critical for corpora of near-identical
-        documents (e.g. 800+ invoices with the same template) where
-        cosine similarity cannot distinguish the correct document.
-        """
-        try:
-            # Build OR conditions for each entity ID
-            conditions = " OR ".join(
-                f"content_with_header ILIKE :id_{i}"
-                for i in range(len(entity_ids[:3]))
-            )
-            params: dict = {"vault_id": vault_id}
-            for i, eid in enumerate(entity_ids[:3]):
-                params[f"id_{i}"] = f"%{eid}%"
-
-            query = sa_text(f"""
-                SELECT id, doc_id, content, content_with_header,
-                       chunk_index, section_heading, page_number
-                FROM chunks
-                WHERE vault_id = :vault_id
-                  AND is_deleted = false
-                  AND ({conditions})
-                ORDER BY chunk_index
-                LIMIT 10
-            """)
-
-            result = await db.execute(query, params)
-            rows = result.fetchall()
-
-            return [
-                SearchResult(
-                    chunk_id=row.id,
-                    doc_id=row.doc_id,
-                    content=row.content,
-                    content_with_header=row.content_with_header,
-                    score=1.0,  # Exact match — highest confidence
-                    section_heading=row.section_heading,
-                    page_number=row.page_number,
-                )
-                for row in rows
-            ]
-        except Exception as exc:
-            logger.warning(f"Exact-ID search failed: {exc}")
-            return []
 
     async def _verify_against_context(
         self, claim: Claim, results: list[SearchResult],

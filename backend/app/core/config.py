@@ -31,6 +31,10 @@ class ClaimConfig(BaseSettings):
     VERIFICATION_MMR_LAMBDA: float = 1.0
     EXTRACT_FROM_QUESTIONS: bool = True
 
+    # Short segments containing entity anchors bypass word-count filter.
+    # Patterns: numeric IDs (4+ digits), dollar amounts, entity keywords.
+    SEGMENT_ENTITY_BYPASS: bool = True
+
 
 class TranscriptionConfig(BaseSettings):
     """Transcription session & audio settings."""
@@ -132,6 +136,18 @@ class Settings(BaseSettings):
     RAG_SEARCH_TOP_K: int = 5
     RAG_GENERATION_TEMPERATURE: float = 0.1
 
+    # Query rewriting — resolves pronouns and co-references using
+    # conversation history so the retrieval query is always standalone.
+    QUERY_REWRITE_ENABLED: bool = True
+    QUERY_REWRITE_MODEL: str = ""  # defaults to OPENAI_QUERY_MODEL if empty
+    QUERY_HISTORY_MAX_TURNS: int = 10
+
+    # Entity-aware retrieval — direct SQL lookup for entity IDs
+    # (invoice numbers, order numbers) before embedding search.
+    ENTITY_SEARCH_ENABLED: bool = True
+    ENTITY_SEARCH_MAX_IDS: int = 3
+    ENTITY_SEARCH_LIMIT: int = 10
+
     # Kafka / Redpanda
     KAFKA_BOOTSTRAP_SERVERS: str = "localhost:19092"
     KAFKA_CONSUMER_GROUP: str = "ailways-workers"
@@ -147,7 +163,7 @@ class Settings(BaseSettings):
     DB_POOL_PRE_PING: bool = True
 
     # External API timeouts
-    API_TIMEOUT_S: float = 30.0
+    API_TIMEOUT_S: float = 60.0
     EMBEDDING_TIMEOUT_S: float = 60.0
 
     # WebSocket

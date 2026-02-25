@@ -222,16 +222,49 @@ def _filter_segments(
 
     Removes ultra-short (fewer than ``CLAIM_SEGMENT_MIN_WORDS`` words)
     and low-confidence (below ``CLAIM_SEGMENT_MIN_CONFIDENCE``) segments.
+
+    Exception: short segments containing entity anchors (numeric IDs,
+    dollar amounts, entity keywords) are preserved because they often
+    carry critical information (e.g. "Invoice 10248.", "$440.").
     """
     filtered: list[TranscriptSegment] = []
     for seg in segments:
-        word_count = len(seg.text.split())
-        if word_count < SETTINGS.CLAIM.SEGMENT_MIN_WORDS:
-            continue
         if seg.confidence < SETTINGS.CLAIM.SEGMENT_MIN_CONFIDENCE:
             continue
+
+        word_count = len(seg.text.split())
+        if word_count < SETTINGS.CLAIM.SEGMENT_MIN_WORDS:
+            # Bypass: keep short segments with entity anchors
+            if SETTINGS.CLAIM.SEGMENT_ENTITY_BYPASS and _has_entity_anchor(seg.text):
+                filtered.append(seg)
+            continue
+
         filtered.append(seg)
     return filtered
+
+
+def _has_entity_anchor(text: str) -> bool:
+    """Check whether text contains an entity anchor worth preserving.
+
+    Matches:
+      - Numeric IDs with 4+ digits (invoice/order numbers)
+      - Dollar amounts ($100, $1500.00)
+      - Entity keywords (invoice, order, PO, shipping)
+    """
+    import re
+    # Numeric IDs
+    if re.search(r"\b\d{4,}\b", text):
+        return True
+    # Dollar amounts
+    if re.search(r"\$[\d,.]+", text):
+        return True
+    # Entity keywords
+    if re.search(
+        r"\b(?:invoice|order|purchase\s*order|po|shipping|delivery|receipt)\b",
+        text, re.IGNORECASE,
+    ):
+        return True
+    return False
 
 
 def _format_transcript(segments: list[TranscriptSegment]) -> str:
