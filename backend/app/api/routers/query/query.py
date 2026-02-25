@@ -12,10 +12,7 @@ from app.db import get_db
 from app.db.models import User
 from app.core.auth.deps import get_current_user, require_vault_member
 from app.core.config import get_settings
-from app.core.rag.embedding import get_embedder
-from app.core.rag.retrieval import hybrid_search, entity_id_search
-from app.core.rag.generation import generate_answer, stream_answer, parse_response
-from app.core.rag.query import rewrite_query, extract_entity_ids
+from app.core.copilot import query_vault_agent, stream_vault_agent
 from app.core.logger import setup_logger
 
 from app.api.routers.query.schemas import QueryRequest, QueryResponse
@@ -32,35 +29,45 @@ SETTINGS = get_settings()
 
 async def _sse_stream(
     query: str,
-    results: list,
+    vault_id: UUID,
     history_dicts: list[dict[str, str]] | None,
+    top_k: int,
     start: float,
 ) -> AsyncIterator[str]:
-    """Yield Server-Sent Events for a streaming query response.
+    """Yield Server-Sent Events from the copilot agent stream.
 
     Event types:
-      - ``retrieval``: search complete, includes ``chunks_used``.
+      - ``retrieval``: agent called a search tool, includes ``chunks_used``.
       - ``token``: raw LLM content delta.
       - ``done``: final structured response with answer, citations, etc.
       - ``error``: generation failed, includes fallback answer.
     """
-    yield f"data: {json.dumps({'type': 'retrieval', 'chunks_used': len(results)})}\n\n"
-
-    full_content = ""
     try:
-        async for token in stream_answer(query, results, history=history_dicts):
-            full_content += token
-            yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+        async for event in stream_vault_agent(
+            query=query,
+            vault_id=vault_id,
+            history=history_dicts,
+            top_k=top_k,
+        ):
+            event_type = event.get("type", "")
 
-        answer = parse_response(full_content)
+            if event_type == "retrieval":
+                yield f"data: {json.dumps({'type': 'retrieval', 'chunks_used': event.get('chunks_used', 0)})}\n\n"
+
+            elif event_type == "token":
+                yield f"data: {json.dumps({'type': 'token', 'content': event.get('content', '')})}\n\n"
+
+            elif event_type == "done":
+                event["latency_ms"] = int((time.monotonic() - start) * 1000)
+                yield f"data: {json.dumps(event)}\n\n"
+
+            elif event_type == "error":
+                event["latency_ms"] = int((time.monotonic() - start) * 1000)
+                yield f"data: {json.dumps(event)}\n\n"
+
     except Exception as e:
-        logger.error(f"Streaming generation failed: {e}")
-        yield f"data: {json.dumps({'type': 'error', 'answer': 'Generation failed.', 'confidence': 0.0})}\n\n"
-        return
-
-    yield (
-        f"data: {json.dumps({'type': 'done', **answer.model_dump(mode='json'), 'chunks_used': len(results), 'retrieval_method': 'hybrid', 'latency_ms': int((time.monotonic() - start) * 1000)})}\n\n"
-    )
+        logger.error(f"SSE stream error: {e}")
+        yield f"data: {json.dumps({'type': 'error', 'answer': 'Stream failed.', 'confidence': 0.0})}\n\n"
 
 
 @router.post("/query", summary="Query a vault and get a cited answer")
@@ -71,14 +78,15 @@ async def query_vault(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Query documents in a vault and receive a grounded, cited answer.
+    """Query documents in a vault using the agentic copilot.
 
-    Pipeline:
+    Pipeline (LangGraph ReAct agent):
         1. Rewrite query (resolve pronouns/coreferences from history)
-        2. Extract entity IDs → exact SQL lookup
-        3. Embed → hybrid search (dense + BM25 + RRF + MMR)
-        4. Merge entity + hybrid results
-        5. Generate answer (with conversation history for continuity)
+        2. Agent decides which tools to use:
+           - ``search_documents``: hybrid search (dense + BM25 + RRF + MMR)
+           - ``lookup_entity``: direct SQL lookup for entity IDs
+        3. Agent may do multiple search rounds if needed
+        4. Generate grounded answer with citations
 
     When ``stream=true``, returns a ``text/event-stream`` response with
     token-by-token deltas followed by a final structured ``done`` event.
@@ -87,96 +95,41 @@ async def query_vault(
 
     start = time.monotonic()
 
-    # Convert history to plain dicts for downstream modules
+    # Convert history to plain dicts for the copilot module
     history_dicts: list[dict[str, str]] | None = None
     if body.history:
         history_dicts = [{"role": m.role, "content": m.content} for m in body.history]
 
-    # 1. Rewrite query — resolve pronouns and coreferences
-    #    "who are the customers of it?" → "who are the customers of invoice 10248?"
-    rewritten_query = await rewrite_query(body.query, history_dicts)
-    logger.info(
-        f"Query pipeline: original='{body.query[:60]}' "
-        f"rewritten='{rewritten_query[:60]}'"
-    )
-
-    # 2. Entity-aware retrieval — exact SQL lookup for referenced IDs
-    entity_ids = extract_entity_ids(rewritten_query)
-    exact_results = []
-    if entity_ids:
-        exact_results = await entity_id_search(entity_ids, vault_id, db)
-        logger.info(f"Entity search: IDs={entity_ids}, found={len(exact_results)} chunks")
-
-    # 3. Embed the rewritten query
-    embedder = get_embedder()
-    try:
-        query_embedding = await asyncio.wait_for(
-            embedder.embed_query(rewritten_query),
-            timeout=SETTINGS.EMBEDDING_TIMEOUT_S,
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="Query embedding timed out",
-        )
-
-    # 4. Hybrid search (dense + sparse + RRF + MMR)
-    hybrid_results = await hybrid_search(
-        query_text=rewritten_query,
-        query_embedding=query_embedding,
-        vault_id=vault_id,
-        db=db,
-        top_k=body.top_k,
-    )
-
-    # 5. Merge: exact-ID hits first, then hybrid (deduplicated)
-    if exact_results:
-        seen_ids = {r.chunk_id for r in exact_results}
-        merged = list(exact_results)
-        for r in hybrid_results:
-            if r.chunk_id not in seen_ids:
-                merged.append(r)
-                seen_ids.add(r.chunk_id)
-        results = merged[: body.top_k + len(exact_results)]
-    else:
-        results = hybrid_results
-
-    # 6. Generate answer
-    if not results:
-        if stream:
-            async def _empty_stream() -> AsyncIterator[str]:
-                yield f"data: {json.dumps({'type': 'done', 'answer': 'No relevant documents were found for your query.', 'citations': [], 'confidence': 0.0, 'has_sufficient_evidence': False, 'chunks_used': 0, 'retrieval_method': 'hybrid', 'latency_ms': int((time.monotonic() - start) * 1000)})}\n\n"
-            return StreamingResponse(_empty_stream(), media_type="text/event-stream")
-        return QueryResponse(
-            answer="No relevant documents were found for your query.",
-            latency_ms=int((time.monotonic() - start) * 1000),
-        )
-
-    # Streaming path — SSE with token deltas + final structured event
+    # Streaming path — SSE with token deltas from the agent
     if stream:
         return StreamingResponse(
-            _sse_stream(rewritten_query, results, history_dicts, start),
+            _sse_stream(body.query, vault_id, history_dicts, body.top_k, start),
             media_type="text/event-stream",
         )
 
-    # Non-streaming path — full JSON response (default, backward-compatible)
+    # Non-streaming path — full JSON response
     try:
         answer = await asyncio.wait_for(
-            generate_answer(rewritten_query, results, history=history_dicts),
+            query_vault_agent(
+                query=body.query,
+                vault_id=vault_id,
+                history=history_dicts,
+                top_k=body.top_k,
+            ),
             timeout=SETTINGS.API_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="Answer generation timed out",
+            detail="Query timed out",
         )
 
     return QueryResponse(
         answer=answer.answer,
-        citations=answer.citations,
+        citations=[],
         confidence=answer.confidence,
         has_sufficient_evidence=answer.has_sufficient_evidence,
-        chunks_used=len(results),
-        retrieval_method="hybrid",
+        chunks_used=0,
+        retrieval_method="agent",
         latency_ms=int((time.monotonic() - start) * 1000),
     )

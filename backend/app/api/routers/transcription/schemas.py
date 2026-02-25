@@ -8,7 +8,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, field_validator
 
-from app.core.claims.base import Evidence
+from app.core.copilot.base import Evidence
 
 
 # ---------------------------------------------------------------------------

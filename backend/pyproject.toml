@@ -34,6 +34,7 @@ dependencies = [
     "deepgram-sdk>=6.0.0",
     "groq>=1.0.0",
     "websockets>=15.0.1",
+    "langgraph>=1.0.9",
 ]
 
 [project.optional-dependencies]

@@ -104,40 +104,38 @@ async def transcribe_audio(
     verdicts_response: list[ClaimVerdictResponse] = []
 
     if SETTINGS.CLAIM.DETECTION_ENABLED and transcript.segments:
-        from app.core.claims import get_claim_detector, get_claim_verifier
+        from app.core.copilot import extract_statements, verify_statement
 
-        detector = get_claim_detector()
         try:
-            claims = await asyncio.wait_for(
-                detector.detect_claims(transcript.segments),
+            statements = await asyncio.wait_for(
+                extract_statements(transcript.segments),
                 timeout=SETTINGS.API_TIMEOUT_S,
             )
         except asyncio.TimeoutError:
-            logger.warning("Claim detection timed out — returning transcript without claims")
-            claims = []
+            logger.warning("Statement extraction timed out — returning transcript without claims")
+            statements = []
 
         claims_response = [
             ClaimResponse(
-                id=c.id, text=c.text, speaker=c.speaker,
-                timestamp_start=c.timestamp_start, timestamp_end=c.timestamp_end,
-                context=c.context,
+                id=s.id, text=s.text, speaker=s.speaker,
+                timestamp_start=s.timestamp_start, timestamp_end=s.timestamp_end,
+                context=s.context,
             )
-            for c in claims
+            for s in statements
         ]
 
-        if claims:
-            verifier = get_claim_verifier()
+        if statements:
             raw_verdicts = await asyncio.gather(*[
                 asyncio.wait_for(
-                    verifier.verify_claim(c, vault_id, db),
+                    verify_statement(s, vault_id),
                     timeout=SETTINGS.API_TIMEOUT_S,
                 )
-                for c in claims
+                for s in statements
             ], return_exceptions=True)
 
             for v in raw_verdicts:
                 if isinstance(v, BaseException):
-                    logger.warning(f"Claim verification failed: {v}")
+                    logger.warning(f"Statement verification failed: {v}")
                     continue
                 verdicts_response.append(
                     ClaimVerdictResponse(

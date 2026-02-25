@@ -36,6 +36,32 @@ class ClaimConfig(BaseSettings):
     SEGMENT_ENTITY_BYPASS: bool = True
 
 
+class CopilotConfig(BaseSettings):
+    """Agentic copilot — LangGraph-based extraction & verification settings."""
+    model_config = SettingsConfigDict(env_prefix="COPILOT_", env_file=".env", extra="ignore")
+
+    # Extraction — model used to pull verifiable statements from transcript
+    EXTRACTION_MODEL: str = ""  # defaults to GROQ_MODEL if empty
+    EXTRACTION_TEMPERATURE: float = 0.1
+    EXTRACTION_MAX_RETRIES: int = 3
+
+    # Verification — LangGraph self-corrective retrieval graph
+    VERIFICATION_MODEL: str = ""  # defaults to OPENAI_QUERY_MODEL if empty
+    VERIFICATION_TEMPERATURE: float = 0.0
+    VERIFICATION_TOP_K: int = 5
+    VERIFICATION_MAX_SEARCH_ATTEMPTS: int = 2
+    VERIFICATION_MMR_LAMBDA: float = 1.0
+
+    # Grading — fast model to grade retrieval relevance before synthesis
+    GRADING_MODEL: str = ""  # defaults to OPENAI_QUERY_MODEL if empty
+    GRADING_TEMPERATURE: float = 0.0
+
+    # Query agent — ReAct agent for copilot chat
+    AGENT_MODEL: str = ""  # defaults to OPENAI_REASONING_MODEL if empty
+    AGENT_TEMPERATURE: float = 0.1
+    AGENT_MAX_ITERATIONS: int = 5
+
+
 class TranscriptionConfig(BaseSettings):
     """Transcription session & audio settings."""
     model_config = SettingsConfigDict(env_prefix="TRANSCRIPTION_", env_file=".env", extra="ignore")
@@ -186,6 +212,7 @@ class Settings(BaseSettings):
 
     # Grouped sub-configs
     CLAIM: ClaimConfig = ClaimConfig()
+    COPILOT: CopilotConfig = CopilotConfig()
     TRANSCRIPTION: TranscriptionConfig = TranscriptionConfig()
     WORKER: WorkerConfig = WorkerConfig()
 

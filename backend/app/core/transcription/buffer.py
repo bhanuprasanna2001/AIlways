@@ -1,11 +1,11 @@
-"""Transcript buffer — sliding context window for claim detection.
+"""Transcript buffer — sliding context window for statement extraction.
 
 Key design:
 1. Context window of last N checked segments for entity reference resolution.
 2. Timer-only triggering via ``should_trigger_claims()`` — no reactive
    ``speech_final`` trigger, ensuring related segments split across
    DeepGram messages are always batched together.
-3. Duplicate claim prevention via word-overlap fingerprinting.
+3. Duplicate statement prevention via word-overlap fingerprinting.
 4. Memory bounded at ``CLAIM_MAX_BUFFER_SEGMENTS``.
 """
 
@@ -13,16 +13,22 @@ from __future__ import annotations
 
 import re
 import time
+from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from app.core.transcription.base import TranscriptSegment
-from app.core.claims.base import Claim
 from app.core.config import get_settings
 from app.core.logger import setup_logger
 
 logger = setup_logger(__name__)
 
 SETTINGS = get_settings()
+
+
+@runtime_checkable
+class _HasText(Protocol):
+    """Any object with a ``text`` attribute — both Claim and Statement satisfy."""
+    text: str
 
 
 class TranscriptBuffer:
@@ -104,13 +110,17 @@ class TranscriptBuffer:
 
     # Deduplication -----------------------------------------------------------
 
-    def deduplicate_claims(self, claims: list[Claim]) -> list[Claim]:
-        """Filter out claims that are semantically duplicate of already-seen ones."""
-        new_claims: list[Claim] = []
+    def deduplicate_claims(self, claims: list) -> list:
+        """Filter out statements/claims that are semantically duplicate of already-seen ones.
+
+        Accepts any list of objects with a ``.text`` attribute (both
+        ``Statement`` and ``Claim`` models satisfy this).
+        """
+        new_claims: list = []
         for claim in claims:
             fp = claim_fingerprint(claim.text)
             if self._is_duplicate(fp):
-                logger.debug(f"Duplicate claim skipped: {claim.text[:50]}")
+                logger.debug(f"Duplicate skipped: {claim.text[:50]}")
                 continue
             self._seen_claim_fingerprints.add(fp)
             new_claims.append(claim)
@@ -136,48 +146,55 @@ class TranscriptBuffer:
         """Extract key entities from text and merge into the running summary.
 
         Uses simple regex patterns to avoid an LLM call while providing
-        enough context for claim resolution.
+        enough context for statement resolution.
 
         IMPORTANT: Merges new entities with existing ones instead of
         overwriting, so previously mentioned entities are never lost.
+
+        Universal: works for invoices, orders, contracts, serial numbers,
+        case IDs, and other common business identifiers.
         """
         entities: dict[str, set[str]] = {
-            "invoice_numbers": set(),
-            "order_ids": set(),
+            "reference_numbers": set(),
+            "numeric_ids": set(),
             "amounts": set(),
         }
 
         # Parse existing summary back into sets for merging
         for line in self.entity_summary.split("\n"):
             line = line.strip().lstrip("- ")
-            if line.startswith("Invoice Numbers:"):
+            if line.startswith("Reference Numbers:"):
                 for v in line.split(":", 1)[1].split(","):
                     v = v.strip()
                     if v:
-                        entities["invoice_numbers"].add(v)
-            elif line.startswith("Order Ids:"):
+                        entities["reference_numbers"].add(v)
+            elif line.startswith("Numeric Ids:"):
                 for v in line.split(":", 1)[1].split(","):
                     v = v.strip()
                     if v:
-                        entities["order_ids"].add(v)
+                        entities["numeric_ids"].add(v)
             elif line.startswith("Amounts:"):
                 for v in line.split(":", 1)[1].split(","):
                     v = v.strip()
                     if v:
                         entities["amounts"].add(v)
 
-        # Extract new entities from text
+        # Extract reference numbers with entity keywords
         for match in re.finditer(
-            r"(?:invoice|order|po|purchase\s*order)\s*(?:number|#|id|no\.?)?\s*:?\s*([A-Z]*-?\d{3,})",
+            r"(?:invoice|order|po|purchase\s*order|contract|ticket|case|"
+            r"serial|batch|lot|ref|shipment|delivery|receipt)"
+            r"\s*(?:number|#|id|no\.?)?\s*:?\s*([A-Z]*-?\d{3,})",
             text, re.IGNORECASE,
         ):
-            entities["invoice_numbers"].add(match.group(1))
+            entities["reference_numbers"].add(match.group(1))
 
+        # Bare numeric IDs (5+ digits to avoid false positives)
         for match in re.finditer(r"\b(\d{5,})\b", text):
-            entities["order_ids"].add(match.group(1))
+            entities["numeric_ids"].add(match.group(1))
 
+        # Currency amounts (multi-currency)
         for match in re.finditer(
-            r"\$[\d,]+\.?\d*|\d+[\d,]*\.?\d*\s*(?:dollars|usd)",
+            r"[$€£¥][\d,]+\.?\d*|\d+[\d,]*\.?\d*\s*(?:dollars|usd|eur|gbp)",
             text, re.IGNORECASE,
         ):
             entities["amounts"].add(match.group(0))
@@ -189,7 +206,6 @@ class TranscriptBuffer:
                 parts.append(f"- {label}: {', '.join(sorted(values))}")
 
         if parts:
-            # Cap entity summary to prevent unbounded growth
             self.entity_summary = "\n".join(parts)[:2000]
 
 
