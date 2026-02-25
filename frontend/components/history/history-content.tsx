@@ -2,18 +2,29 @@
 
 import { useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
+import useSWR from "swr";
 import { Clock, Trash2, Search } from "lucide-react";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Modal } from "@/components/ui/modal";
+import { Badge } from "@/components/ui/badge";
 import { useConversations } from "@/hooks/use-conversations";
+import { fetcher } from "@/lib/api";
 import { formatRelativeTime, truncate } from "@/lib/utils";
+import type { Vault } from "@/lib/types";
 
 export default function HistoryContent() {
   const router = useRouter();
   const { conversations, removeConversation, clearAll } = useConversations();
+  const { data: vaults } = useSWR<Vault[]>("/api/vaults", fetcher);
   const [search, setSearch] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [showClearAll, setShowClearAll] = useState(false);
+
+  // Set of active vault IDs for fast lookup
+  const activeVaultIds = useMemo(
+    () => new Set(vaults?.map((v) => v.id)),
+    [vaults],
+  );
 
   const filtered = useMemo(() => {
     if (!search) return conversations;
@@ -85,9 +96,14 @@ export default function HistoryContent() {
                 }
                 className="flex-1 text-left"
               >
-                <p className="text-sm font-medium text-foreground">
-                  {truncate(conv.title, 80)}
-                </p>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-medium text-foreground">
+                    {truncate(conv.title, 80)}
+                  </p>
+                  {vaults && !activeVaultIds.has(conv.vault_id) && (
+                    <Badge variant="warning">Vault deleted</Badge>
+                  )}
+                </div>
                 <p className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">
                   {conv.vault_name} · {conv.messages.length} message
                   {conv.messages.length !== 1 ? "s" : ""} ·{" "}
