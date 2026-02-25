@@ -4,6 +4,61 @@ from pydantic import computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# ---------------------------------------------------------------------------
+# Nested sub-configs — each reads env vars matching its prefix
+# ---------------------------------------------------------------------------
+
+class ClaimConfig(BaseSettings):
+    """Claim detection & verification settings."""
+    model_config = SettingsConfigDict(env_prefix="CLAIM_", env_file=".env", extra="ignore")
+
+    DETECTION_ENABLED: bool = True
+    BATCH_INTERVAL_S: float = 6.0
+    VERIFICATION_TOP_K: int = 5
+    CONTEXT_SEGMENTS: int = 10
+    FLUSH_INTERVAL_S: float = 1.0
+    IDLE_TIMEOUT_S: float = 2.0
+    MAX_BUFFER_SEGMENTS: int = 100
+    MIN_SEGMENTS: int = 1
+    MIN_CHARS: int = 20
+    DEDUP_THRESHOLD: float = 0.8
+    SEGMENT_MIN_WORDS: int = 3
+    SEGMENT_MIN_CONFIDENCE: float = 0.5
+    GROQ_MAX_RETRIES: int = 3
+    DRAIN_TIMEOUT_S: float = 3.0
+    TASK_TIMEOUT_S: float = 15.0
+    MAX_CONCURRENT_TASKS: int = 5
+    VERIFICATION_MMR_LAMBDA: float = 1.0
+    EXTRACT_FROM_QUESTIONS: bool = True
+
+
+class TranscriptionConfig(BaseSettings):
+    """Transcription session & audio settings."""
+    model_config = SettingsConfigDict(env_prefix="TRANSCRIPTION_", env_file=".env", extra="ignore")
+
+    SESSION_STALE_TIMEOUT_MINUTES: int = 30
+    STALE_CLEANUP_INTERVAL_MINUTES: int = 30
+    DB_FLUSH_INTERVAL_S: float = 2.0
+    DB_FLUSH_BATCH_SIZE: int = 50
+    MAX_SESSION_DURATION_S: int = 14400
+    SESSION_TITLE_MAX_LENGTH: int = 255
+    WS_TICKET_TTL_S: int = 60
+    MAX_AUDIO_SIZE_MB: int = 100
+
+
+class WorkerConfig(BaseSettings):
+    """Kafka worker tuning."""
+    model_config = SettingsConfigDict(env_prefix="WORKER_", env_file=".env", extra="ignore")
+
+    INGESTION_BATCH_SIZE: int = 20
+    INGESTION_BATCH_TIMEOUT_S: float = 2.0
+    INGESTION_CONCURRENCY: int = 5
+
+
+# ---------------------------------------------------------------------------
+# Root settings
+# ---------------------------------------------------------------------------
+
 class Settings(BaseSettings):
     
     # General
@@ -21,24 +76,14 @@ class Settings(BaseSettings):
     SERVER_RELOAD: bool = True
     SERVER_HOST: str = "0.0.0.0"
 
-    # Auth
-    JWT_SECRET_KEY: str = "unsafe"
-    JWT_ALGORITHM: str = "HS256"
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-
     # Database
     POSTGRES_USER: str = "myuser"
     POSTGRES_PASSWORD: str = "mypassword"
     POSTGRES_DB: str = "mydatabase"
     POSTGRES_PORT: int = 5434
 
-    # Pg Admin
-    PGADMIN_EMAIL: str | None = None
-    PGADMIN_PASSWORD: str | None = None
-    PGADMIN_PORT: int | None = None
-
     # CORS
-    CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080"]
+    CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080", "http://localhost:8501"]
     CORS_METHODS: List[str] = ["*"]
     CORS_HEADERS: List[str] = ["*"]
     CORS_ALLOW_CREDENTIALS: bool = True
@@ -51,7 +96,82 @@ class Settings(BaseSettings):
     # Cookies
     SESSION_COOKIE_NAME: str = "session_id"
     CSRF_COOKIE_NAME: str = "csrf_token"
-    
+
+    # OpenAI
+    OPENAI_API_KEY: str = ""
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-large"
+    OPENAI_EMBEDDING_DIMENSIONS: int = 1536
+    OPENAI_REASONING_MODEL: str = "gpt-4o"
+    OPENAI_QUERY_MODEL: str = "gpt-4o-mini"
+
+    # Cohere (optional — empty disables reranking)
+    COHERE_API_KEY: str = ""
+
+    # Deepgram (transcription + diarization)
+    DEEPGRAM_API_KEY: str = ""
+    DEEPGRAM_MODEL: str = "nova-3"
+    DEEPGRAM_LANGUAGE: str = "en"
+    DEEPGRAM_ENDPOINTING_MS: int = 500
+    DEEPGRAM_DIARIZE: bool = True
+
+    # Groq (fast LLM for claim detection)
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+
+    # File Storage
+    FILE_STORE_PATH: str = "./data/uploads"
+
+    # Ingestion
+    MAX_FILE_SIZE_MB: int = 50
+    ALLOWED_FILE_TYPES: list[str] = ["pdf", "txt", "md"]
+
+    # RAG Pipeline
+    RAG_CHUNK_SIZE: int = 512
+    RAG_CHUNK_OVERLAP: int = 50
+    RAG_EMBEDDING_BATCH_SIZE: int = 2048
+    RAG_SEARCH_TOP_K: int = 5
+    RAG_GENERATION_TEMPERATURE: float = 0.1
+
+    # Kafka / Redpanda
+    KAFKA_BOOTSTRAP_SERVERS: str = "localhost:19092"
+    KAFKA_CONSUMER_GROUP: str = "ailways-workers"
+    KAFKA_ENABLED: bool = True
+    KAFKA_PRODUCER_TIMEOUT_MS: int = 10000
+    KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS: int = 600000
+    KAFKA_RECOVERY_INTERVAL_MINUTES: int = 5
+
+    # Database pool
+    DB_POOL_SIZE: int = 10
+    DB_POOL_MAX_OVERFLOW: int = 20
+    DB_POOL_RECYCLE_S: int = 3600
+    DB_POOL_PRE_PING: bool = True
+
+    # External API timeouts
+    API_TIMEOUT_S: float = 30.0
+    EMBEDDING_TIMEOUT_S: float = 60.0
+
+    # WebSocket
+    WS_HEARTBEAT_INTERVAL_S: float = 30.0
+    WS_RECEIVE_TIMEOUT_S: float = 300.0
+    MAX_CONCURRENT_TRANSCRIPTION_SESSIONS: int = 3
+
+    # Pagination
+    PAGINATION_DEFAULT_LIMIT: int = 50
+    PAGINATION_MAX_LIMIT: int = 200
+
+    # Sparse search
+    SPARSE_SEARCH_MAX_QUERY_LENGTH: int = 500
+
+    # PDF process pool
+    PDF_PARSE_WORKERS: int = 2
+
+    # Embedding cache (Redis-backed query dedup)
+    EMBEDDING_CACHE_TTL_S: float = 300.0
+
+    # Grouped sub-configs
+    CLAIM: ClaimConfig = ClaimConfig()
+    TRANSCRIPTION: TranscriptionConfig = TranscriptionConfig()
+    WORKER: WorkerConfig = WorkerConfig()
 
     @computed_field
     @property
@@ -81,11 +201,15 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_config(self) -> "Settings":
         if self.ENV == "production":
-            assert "@db:" in self.DATABASE_URL, "Production DB URL must route to 'db' service"
-            assert "@redis:" in self.REDIS_URL, "Production Redis URL must route to 'redis' service"
+            if "@db:" not in self.DATABASE_URL:
+                raise ValueError("Production DB URL must route to 'db' service")
+            if "@redis:" not in self.REDIS_URL:
+                raise ValueError("Production Redis URL must route to 'redis' service")
         else:
-            assert "@localhost:" in self.DATABASE_URL, "Dev DB URL must route to localhost"
-            assert "@localhost:" in self.REDIS_URL, "Dev Redis URL must route to localhost"
+            if "@localhost:" not in self.DATABASE_URL:
+                raise ValueError("Dev DB URL must route to localhost")
+            if "@localhost:" not in self.REDIS_URL:
+                raise ValueError("Dev Redis URL must route to localhost")
         return self
 
 

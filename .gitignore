@@ -3,8 +3,12 @@
 
 
 ### My ###
+backend/data/*
 data/*
 !data/.gitkeep
+learnings
+template-design
+langgraph-main
 
 ### JetBrains+all ###
 # Covers JetBrains IDEs: IntelliJ, RubyMine, PhpStorm, AppCode, PyCharm, CLion, Android Studio, WebStorm and Rider
@@ -208,7 +212,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/

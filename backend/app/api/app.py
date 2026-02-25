@@ -1,53 +1,45 @@
+"""FastAPI application factory."""
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 
 from app.api.routers import root
 from app.api.routers.auth.auth import router as auth_router
+from app.api.routers.vault.vault import router as vault_router
+from app.api.routers.documents.documents import router as documents_router
+from app.api.routers.query.query import router as query_router
+from app.api.routers.transcription.transcription import router as transcription_router
+from app.api.routers.transcription.sessions import router as sessions_router
 
 from app.api.lifespan import lifespan
-from app.core.config import Settings, get_settings
+from app.core.config import Settings
 from app.api.extensions import validation_exception_handler
 
 
-SETTINGS = get_settings()
-
-
-def create_instance(settings: Settings) -> FastAPI:
+def create_app(settings: Settings) -> FastAPI:
+    """Create and configure the FastAPI application."""
     app = FastAPI(
         title=settings.APP_TITLE,
         version=settings.APP_VERSION,
         description=settings.APP_DESCRIPTION,
         lifespan=lifespan,
     )
-    return app
 
-
-def register_extensions(app: FastAPI) -> FastAPI:
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
-    return app
 
-
-def register_middlewares(app: FastAPI) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=SETTINGS.CORS_ORIGINS,
-        allow_methods=SETTINGS.CORS_METHODS,
-        allow_headers=SETTINGS.CORS_HEADERS,
-        allow_credentials=SETTINGS.CORS_ALLOW_CREDENTIALS,
+        allow_origins=settings.CORS_ORIGINS,
+        allow_methods=settings.CORS_METHODS,
+        allow_headers=settings.CORS_HEADERS,
+        allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
     )
-    return app
 
+    for r in (
+        root.router, auth_router, vault_router, documents_router,
+        query_router, transcription_router, sessions_router,
+    ):
+        app.include_router(r)
 
-def register_routers(app: FastAPI) -> FastAPI:
-    app.include_router(root.router)
-    app.include_router(auth_router)
-    return app
-
-
-def create_app(settings: Settings) -> FastAPI:
-    app = create_instance(settings)
-    app = register_extensions(app)
-    app = register_middlewares(app)
-    app = register_routers(app)
     return app

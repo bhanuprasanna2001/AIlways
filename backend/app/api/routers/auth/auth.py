@@ -11,8 +11,8 @@ from app.db.models import User
 
 from app.core.config import get_settings
 from app.core.auth.security import hash_password, verify_password
-from app.core.tools.redis import store_session, get_session, delete_session
 from app.core.auth.deps import get_current_user, require_csrf, SESSION_COOKIE_NAME, CSRF_COOKIE_NAME
+from app.core.tools.redis import store_session, delete_session, store_ws_ticket
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -23,14 +23,7 @@ _limiter = Limiter(_rate)
 
 
 def cookie_opts(http_only: bool = True):
-    """Helper function to generate cookie options.
-
-    Args:
-        http_only (bool, optional): Whether the cookie should be HTTP-only. Defaults to True.
-
-    Returns:
-        dict: A dictionary of cookie options.
-    """
+    """Build standard cookie options dict for session/CSRF cookies."""
     return dict(
         httponly=http_only,
         secure=SETTINGS.COOKIE_SECURE,
@@ -73,24 +66,27 @@ class LoginIn(BaseModel):
     email: EmailStr
     password: str
 
+
+class UpdateMeIn(BaseModel):
+    name: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            raise ValueError("Name cannot be empty")
+        return v
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
 @router.post("/register", dependencies=[Depends(RateLimiter(limiter=_limiter))], summary="Register a new user")
 async def register(user_in: RegisterIn, db: AsyncSession = Depends(get_db)):
-    """Register a new user.
-
-    Args:
-        user_in (RegisterIn): The user registration data.
-        db (AsyncSession, optional): The database session. Defaults to Depends(get_db).
-
-    Raises:
-        HTTPException: If the email is already registered.
-
-    Returns:
-        dict: A success message.
-    """
+    """Register a new user. Raises 400 if the email is already taken."""
     # Check if email is already registered
     email = user_in.email.lower()
     existing_user = await db.execute(
@@ -113,19 +109,7 @@ async def register(user_in: RegisterIn, db: AsyncSession = Depends(get_db)):
 
 @router.post("/login", dependencies=[Depends(RateLimiter(limiter=_limiter))], summary="Login a user")
 async def login(user_in: LoginIn, response: Response, db: AsyncSession = Depends(get_db)):
-    """Login a user.
-
-    Args:
-        user_in (LoginIn): The user login data.
-        response (Response): The FastAPI response object.
-        db (AsyncSession, optional): The database session. Defaults to Depends(get_db).
-
-    Raises:
-        HTTPException: If the email or password is invalid.
-
-    Returns:
-        dict: A success message.
-    """
+    """Authenticate a user and set session + CSRF cookies."""
     # Find user by email
     result = await db.execute(
         select(User).where(User.email == user_in.email.lower())
@@ -157,16 +141,7 @@ async def login(user_in: LoginIn, response: Response, db: AsyncSession = Depends
 
 @router.post("/logout", dependencies=[Depends(require_csrf)], summary="Logout the current user")
 async def logout(request: Request, response: Response, current_user: User = Depends(get_current_user)):
-    """Logout the current user.
-
-    Args:
-        request (Request): The FastAPI request object.
-        response (Response): The FastAPI response object.
-        current_user (User, optional): The currently authenticated user. Defaults to Depends(get_current_user).
-
-    Returns:
-        dict: A success message.
-    """
+    """Logout the current user and clear session cookies."""
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
     if session_id:
         await delete_session(session_id)
@@ -180,16 +155,49 @@ async def logout(request: Request, response: Response, current_user: User = Depe
 
 @router.get("/me", summary="Get the current authenticated user's information")
 async def get_me(current_user: User = Depends(get_current_user)):
-    """Get the current authenticated user's information.
-
-    Args:
-        current_user (User, optional): The currently authenticated user. Defaults to Depends(get_current_user).
-
-    Returns:
-        dict: The current user's information.
-    """
+    """Return the current authenticated user's profile."""
     return {
         "id": str(current_user.id),
         "name": current_user.name,
         "email": current_user.email,
     }
+
+
+@router.patch("/me", dependencies=[Depends(require_csrf)], summary="Update current user profile")
+async def update_me(
+    body: UpdateMeIn,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update the current user's profile."""
+    if body.name is not None:
+        current_user.name = body.name
+        db.add(current_user)
+        await db.commit()
+        await db.refresh(current_user)
+
+    return {
+        "id": str(current_user.id),
+        "name": current_user.name,
+        "email": current_user.email,
+    }
+
+
+@router.post(
+    "/ws-ticket",
+    dependencies=[Depends(require_csrf)],
+    summary="Issue a one-time WebSocket authentication ticket",
+)
+async def issue_ws_ticket(
+    current_user: User = Depends(get_current_user),
+):
+    """Create a short-lived, single-use ticket for WebSocket authentication.
+
+    The browser cannot send cookies on a ``new WebSocket()`` call in
+    all environments, so this endpoint issues a random ticket that the
+    client passes as a query parameter.  The ticket is consumed
+    atomically on first use and cannot be replayed.
+    """
+    ticket = secrets.token_hex(32)
+    await store_ws_ticket(ticket, str(current_user.id))
+    return {"ticket": ticket}
