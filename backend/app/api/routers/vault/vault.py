@@ -2,16 +2,18 @@ from uuid import UUID
 from datetime import datetime
 from sqlmodel import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from app.db import get_db
 from app.db.models import User, Vault, VaultMember, Document
-from app.db.models.utils import _utcnow_naive
+from app.core.utils import utcnow
+from app.core.config import get_settings
 from app.core.auth.deps import get_current_user, require_csrf, require_vault_member
 from app.api.routers.vault.schemas import VaultCreate, VaultUpdate, VaultResponse
 
 
 router = APIRouter(prefix="/vaults", tags=["vaults"])
+SETTINGS = get_settings()
 
 
 # ---------------------------------------------------------------------------
@@ -79,18 +81,35 @@ async def create_vault(
 
 @router.get("", summary="List vaults the current user is a member of")
 async def list_vaults(
+    response: Response,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=None, ge=1),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """List all vaults where the current user holds membership."""
+    effective_limit = min(limit, SETTINGS.PAGINATION_MAX_LIMIT) if limit else SETTINGS.PAGINATION_MAX_LIMIT
+
+    where_clause = [
+        VaultMember.user_id == current_user.id,
+        Vault.is_active == True,
+        Vault.deleted_at == None,
+    ]
+
+    total = (await db.execute(
+        select(func.count())
+        .select_from(Vault)
+        .join(VaultMember, VaultMember.vault_id == Vault.id)
+        .where(*where_clause)
+    )).scalar() or 0
+    response.headers["X-Total-Count"] = str(total)
+
     result = await db.execute(
         select(Vault, VaultMember.role)
         .join(VaultMember, VaultMember.vault_id == Vault.id)
-        .where(
-            VaultMember.user_id == current_user.id,
-            Vault.is_active == True,
-            Vault.deleted_at == None,
-        )
+        .where(*where_clause)
+        .offset(skip)
+        .limit(effective_limit)
     )
     rows = result.all()
     return [await _vault_response(vault, role, db) for vault, role in rows]
@@ -122,7 +141,7 @@ async def update_vault(
     if body.description is not None:
         vault.description = body.description
 
-    vault.updated_at = _utcnow_naive()
+    vault.updated_at = utcnow()
 
     db.add(vault)
     await db.commit()
@@ -141,7 +160,7 @@ async def delete_vault(
     vault, _ = await require_vault_member(vault_id, current_user, db, min_role="owner")
 
     vault.is_active = False
-    vault.deleted_at = _utcnow_naive()
+    vault.deleted_at = utcnow()
 
     db.add(vault)
     await db.commit()

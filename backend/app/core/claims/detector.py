@@ -180,14 +180,17 @@ class GroqClaimDetector:
 
         for attempt in range(max_retries + 1):
             try:
-                response = await self._client.chat.completions.create(
-                    model=self._model,
-                    messages=[
-                        {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user", "content": user_content},
-                    ],
-                    temperature=0.1,
-                    response_format={"type": "json_object"},
+                response = await asyncio.wait_for(
+                    self._client.chat.completions.create(
+                        model=self._model,
+                        messages=[
+                            {"role": "system", "content": _SYSTEM_PROMPT},
+                            {"role": "user", "content": user_content},
+                        ],
+                        temperature=0.1,
+                        response_format={"type": "json_object"},
+                    ),
+                    timeout=SETTINGS.API_TIMEOUT_S,
                 )
                 return response.choices[0].message.content
 

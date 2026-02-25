@@ -1,8 +1,10 @@
 from enum import Enum
 from uuid import UUID
-from datetime import datetime, timezone
+from datetime import datetime
 
 from pydantic import BaseModel
+
+from app.core.utils import utcnow_aware as utcnow
 
 
 # ---------------------------------------------------------------------------
@@ -70,14 +72,3 @@ class DLQEnvelope(BaseModel):
     failed_at: datetime
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def utcnow() -> datetime:
-    """Return current UTC datetime.
-
-    Returns:
-        datetime: Timezone-aware UTC datetime.
-    """
-    return datetime.now(timezone.utc)

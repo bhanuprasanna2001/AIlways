@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from langchain_openai import OpenAIEmbeddings
 
+from app.core.config import get_settings
 from app.core.logger import setup_logger
 
 logger = setup_logger(__name__)
+SETTINGS = get_settings()
 
 
 class OpenAIEmbedder:
@@ -41,8 +45,22 @@ class OpenAIEmbedder:
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts and return one vector per input."""
-        return await self._client.aembed_documents(texts)
+        try:
+            return await asyncio.wait_for(
+                self._client.aembed_documents(texts),
+                timeout=SETTINGS.EMBEDDING_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Embedding timed out for {len(texts)} texts")
+            raise
 
     async def embed_query(self, text: str) -> list[float]:
         """Embed a single query string."""
-        return await self._client.aembed_query(text)
+        try:
+            return await asyncio.wait_for(
+                self._client.aembed_query(text),
+                timeout=SETTINGS.API_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.error("Query embedding timed out")
+            raise

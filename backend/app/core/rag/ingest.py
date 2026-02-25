@@ -145,7 +145,7 @@ async def ingest_document(
         doc = await _get_doc(db, doc_id)
         doc.status = "active"
         doc.error_message = None
-        doc.updated_at = _now()
+        doc.updated_at = utcnow()
         db.add(doc)
 
         # 7. Touch vault so "Latest Activity" reflects ingestion completion
@@ -305,7 +305,7 @@ async def batch_embed_and_store(
                 doc = await _get_doc(db, pdoc.doc_id)
                 doc.status = "active"
                 doc.error_message = None
-                doc.updated_at = _now()
+                doc.updated_at = utcnow()
                 db.add(doc)
 
             results[pdoc.doc_id] = len(chunk_records)

@@ -120,9 +120,11 @@ class Settings(BaseSettings):
 
     # External API timeouts
     API_TIMEOUT_S: float = 30.0
+    EMBEDDING_TIMEOUT_S: float = 60.0
 
     # WebSocket
     WS_HEARTBEAT_INTERVAL_S: float = 30.0
+    WS_RECEIVE_TIMEOUT_S: float = 300.0
     MAX_CONCURRENT_TRANSCRIPTION_SESSIONS: int = 3
 
     # Pagination

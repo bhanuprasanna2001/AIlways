@@ -4,17 +4,18 @@ from uuid import UUID
 from sqlmodel import select, func
 from sqlalchemy import delete as sqlalchemy_delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile, File, status
 from fastapi.responses import JSONResponse
 
 from app.db import get_db
 from app.db.models import User, Document, Chunk
-from app.db.models.utils import _utcnow_naive, touch_vault_updated_at
+from app.db.models.utils import touch_vault_updated_at
 from app.core.config import get_settings
+from app.core.utils import utcnow, utcnow_aware
 from app.core.auth.deps import get_current_user, require_csrf, require_vault_member
 from app.core.storage.local import LocalFileStore
 from app.core.kafka.producer import KafkaProducer, KafkaProducerError
-from app.core.kafka.topics import FILE_EVENTS, FileUploadedEvent, FileDeletedEvent, utcnow
+from app.core.kafka.topics import FILE_EVENTS, FileUploadedEvent, FileDeletedEvent
 from app.core.logger import setup_logger
 
 from app.api.routers.documents.schemas import DocumentResponse, UploadResponse, StatusResponse, ContentResponse
@@ -124,12 +125,27 @@ async def upload_document(
         status="pending",
     )
     db.add(doc)
-    await db.flush()
 
-    # Touch vault timestamp so "Latest Activity" reflects the upload
-    await touch_vault_updated_at(db, vault_id)
+    try:
+        await db.flush()
+        # Touch vault timestamp so "Latest Activity" reflects the upload
+        await touch_vault_updated_at(db, vault_id)
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        # Clean up the orphan file written before the DB commit
+        try:
+            await _file_store.delete(storage_path)
+        except Exception:
+            logger.warning(f"Failed to clean up orphan file: {storage_path}")
+        # Race condition: another concurrent upload committed the same hash
+        if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This file already exists in the vault (concurrent upload)",
+            )
+        raise
 
-    await db.commit()
     await db.refresh(doc)
 
     # --- Async path (Kafka available) ---
@@ -142,7 +158,7 @@ async def upload_document(
             storage_path=storage_path,
             original_filename=file.filename,
             uploaded_by=current_user.id,
-            timestamp=utcnow(),
+            timestamp=utcnow_aware(),
         )
         try:
             await producer.send_event(FILE_EVENTS, event, key=str(vault_id))
@@ -194,17 +210,30 @@ async def upload_document(
 @router.get("", summary="List documents in a vault")
 async def list_documents(
     vault_id: UUID,
+    response: Response,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=None, ge=1),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all non-deleted documents in the vault."""
+    """List non-deleted documents in the vault with optional pagination."""
     await require_vault_member(vault_id, current_user, db)
+    effective_limit = min(limit, SETTINGS.PAGINATION_MAX_LIMIT) if limit else SETTINGS.PAGINATION_MAX_LIMIT
+
+    where_clause = [
+        Document.vault_id == vault_id,
+        Document.deleted_at == None,
+    ]
+
+    total = (await db.execute(
+        select(func.count()).select_from(Document).where(*where_clause)
+    )).scalar() or 0
+    response.headers["X-Total-Count"] = str(total)
 
     result = await db.execute(
-        select(Document).where(
-            Document.vault_id == vault_id,
-            Document.deleted_at == None,
-        )
+        select(Document).where(*where_clause)
+        .offset(skip)
+        .limit(effective_limit)
     )
     documents = result.scalars().all()
 
@@ -352,7 +381,7 @@ async def delete_document(
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    now = _utcnow_naive()
+    now = utcnow()
 
     # --- Async path (Kafka available) ---
     producer = _get_producer(request)
@@ -370,7 +399,7 @@ async def delete_document(
             doc_id=doc_id,
             vault_id=vault_id,
             deleted_by=current_user.id,
-            timestamp=utcnow(),
+            timestamp=utcnow_aware(),
         )
         await producer.send_event(FILE_EVENTS, event, key=str(vault_id))
         return {"message": "Document deletion queued"}

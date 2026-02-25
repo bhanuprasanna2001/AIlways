@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from uuid import UUID
@@ -290,11 +291,23 @@ class RAGClaimVerifier:
         user_message = _USER_TEMPLATE.format(claim=normalized_claim, context=context)
 
         try:
-            response = await self._llm.ainvoke([
-                SystemMessage(content=_SYSTEM_PROMPT),
-                HumanMessage(content=user_message),
-            ])
+            response = await asyncio.wait_for(
+                self._llm.ainvoke([
+                    SystemMessage(content=_SYSTEM_PROMPT),
+                    HumanMessage(content=user_message),
+                ]),
+                timeout=SETTINGS.API_TIMEOUT_S,
+            )
             return _parse_verdict(response.content, claim)
+        except asyncio.TimeoutError:
+            logger.error(f"LLM verification timed out for: {claim.text[:50]}...")
+            return ClaimVerdict(
+                claim_id=claim.id,
+                claim_text=claim.text,
+                verdict="unverifiable",
+                confidence=0.0,
+                explanation="Verification timed out.",
+            )
         except Exception as e:
             logger.error(f"LLM verification failed: {e}")
             return ClaimVerdict(

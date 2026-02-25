@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import select
+from sqlmodel import select, func
 
 from app.db import get_db
 from app.db.models import User, Vault
@@ -14,9 +14,9 @@ from app.db.models.transcription_session import TranscriptionSession
 from app.db.models.transcription_segment import TranscriptionSegment
 from app.db.models.transcription_claim import TranscriptionClaim
 from app.core.auth.deps import get_current_user, require_csrf
-from app.core.utils import safe_json_loads
+from app.core.utils import safe_json_loads, utcnow
+from app.core.config import get_settings
 from app.core.logger import setup_logger
-from app.db.models.utils import _utcnow_naive
 
 from app.api.routers.transcription.schemas import (
     SessionListResponse,
@@ -28,6 +28,7 @@ from app.api.routers.transcription.schemas import (
 
 logger = setup_logger(__name__)
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+SETTINGS = get_settings()
 
 
 # ---------------------------------------------------------------------------
@@ -36,18 +37,32 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 @router.get("", summary="List transcription sessions for the current user")
 async def list_sessions(
+    response: Response,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=None, ge=1),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[SessionListResponse]:
-    """List all transcription sessions for the current user (newest first)."""
+    """List transcription sessions for the current user (newest first)."""
+    effective_limit = min(limit, SETTINGS.PAGINATION_MAX_LIMIT) if limit else SETTINGS.PAGINATION_MAX_LIMIT
+
+    where_clause = [
+        TranscriptionSession.user_id == current_user.id,
+        TranscriptionSession.deleted_at == None,  # noqa: E711
+    ]
+
+    total = (await db.execute(
+        select(func.count()).select_from(TranscriptionSession).where(*where_clause)
+    )).scalar() or 0
+    response.headers["X-Total-Count"] = str(total)
+
     result = await db.execute(
         select(TranscriptionSession, Vault.name)
         .join(Vault, Vault.id == TranscriptionSession.vault_id)
-        .where(
-            TranscriptionSession.user_id == current_user.id,
-            TranscriptionSession.deleted_at == None,  # noqa: E711
-        )
+        .where(*where_clause)
         .order_by(TranscriptionSession.started_at.desc())
+        .offset(skip)
+        .limit(effective_limit)
     )
     rows = result.all()
 
@@ -226,5 +241,5 @@ async def delete_session(
             detail="Session not found",
         )
 
-    session.deleted_at = _utcnow_naive()
+    session.deleted_at = utcnow()
     await db.commit()

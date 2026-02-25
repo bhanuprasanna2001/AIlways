@@ -3,10 +3,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logger import setup_logger
 from app.core.kafka.topics import (
-    EventType, FileDeletedEvent, AuditEvent, AUDIT_EVENTS, utcnow,
+    EventType, FileDeletedEvent, AuditEvent, AUDIT_EVENTS,
 )
+from app.core.utils import utcnow, utcnow_aware
 from app.db.models import Document, Chunk
-from app.db.models.utils import _utcnow_naive, touch_vault_updated_at
+from app.db.models.utils import touch_vault_updated_at
 from app.workers.base import BaseWorker
 
 logger = setup_logger(__name__)
@@ -53,7 +54,7 @@ class DeletionWorker(BaseWorker):
             return
 
         # 3. Soft-delete the document
-        now = _utcnow_naive()
+        now = utcnow()
         doc.status = "deleted"
         doc.deleted_at = now
         doc.updated_at = now
@@ -83,6 +84,6 @@ class DeletionWorker(BaseWorker):
                 doc_id=doc_id,
                 user_id=parsed.deleted_by,
                 payload={"chunks_deleted": chunk_count},
-                timestamp=utcnow(),
+                timestamp=utcnow_aware(),
             ),
         )

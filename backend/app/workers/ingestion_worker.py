@@ -6,8 +6,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.logger import setup_logger
 from app.core.kafka.topics import (
-    EventType, FileUploadedEvent, AuditEvent, AUDIT_EVENTS, utcnow,
+    EventType, FileUploadedEvent, AuditEvent, AUDIT_EVENTS,
 )
+from app.core.utils import utcnow_aware
 from app.core.storage.local import LocalFileStore
 from app.core.rag.ingest import ingest_document, prepare_document, batch_embed_and_store
 from app.core.rag.embedding import get_embedder
@@ -118,7 +119,7 @@ class IngestionWorker(BaseWorker):
                     doc_id=doc_id,
                     user_id=parsed_event.uploaded_by,
                     payload={"chunk_count": chunk_count, "filename": parsed_event.original_filename},
-                    timestamp=utcnow(),
+                    timestamp=utcnow_aware(),
                 ),
             )
 

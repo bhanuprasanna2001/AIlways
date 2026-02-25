@@ -309,7 +309,14 @@ async def live_transcribe(
             # -- Main loop: forward audio from client to DeepGram -----------
             try:
                 while not stop_event.is_set():
-                    data = await websocket.receive()
+                    try:
+                        data = await asyncio.wait_for(
+                            websocket.receive(),
+                            timeout=SETTINGS.WS_RECEIVE_TIMEOUT_S,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.info(f"WS idle timeout ({SETTINGS.WS_RECEIVE_TIMEOUT_S}s): vault={vault_id}")
+                        break
                     if "bytes" in data and data["bytes"]:
                         await live.send_audio(data["bytes"])
                     elif "text" in data and data["text"]:

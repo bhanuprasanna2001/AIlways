@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
+from app.core.config import get_settings
 from app.core.rag.retrieval.base import SearchResult, build_retrieval_context
 from app.core.rag.generation.base import Citation, AnswerResult
 from app.core.logger import setup_logger
 
 logger = setup_logger(__name__)
+SETTINGS = get_settings()
 
 
 # ---------------------------------------------------------------------------
@@ -98,11 +101,17 @@ class OpenAIGenerator:
         user_message = _USER_TEMPLATE.format(context=context, query=query)
 
         try:
-            response = await self._llm.ainvoke([
-                SystemMessage(content=_SYSTEM_PROMPT),
-                HumanMessage(content=user_message),
-            ])
+            response = await asyncio.wait_for(
+                self._llm.ainvoke([
+                    SystemMessage(content=_SYSTEM_PROMPT),
+                    HumanMessage(content=user_message),
+                ]),
+                timeout=SETTINGS.API_TIMEOUT_S,
+            )
             return _parse_response(response.content)
+        except asyncio.TimeoutError:
+            logger.error("Generation timed out")
+            return _INSUFFICIENT
         except Exception as e:
             logger.error(f"Generation failed: {e}")
             return _INSUFFICIENT
