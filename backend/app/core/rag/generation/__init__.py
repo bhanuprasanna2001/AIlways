@@ -10,8 +10,10 @@ Usage::
     result = await generate_answer(query, search_results)
 """
 
+from collections.abc import AsyncIterator
+
 from app.core.rag.generation.base import Citation, AnswerResult, Generator
-from app.core.rag.generation.openai import OpenAIGenerator
+from app.core.rag.generation.openai import OpenAIGenerator, parse_response
 from app.core.config import get_settings
 from app.core.utils import singleton
 
@@ -32,6 +34,12 @@ async def generate_answer(query: str, results: list) -> AnswerResult:
     return await get_generator().generate(query, results)
 
 
+async def stream_answer(query: str, results: list) -> AsyncIterator[str]:
+    """Stream raw LLM tokens — delegates to the shared generator."""
+    async for token in get_generator().stream(query, results):
+        yield token
+
+
 __all__ = [
     "Citation",
     "AnswerResult",
@@ -39,4 +47,6 @@ __all__ = [
     "OpenAIGenerator",
     "get_generator",
     "generate_answer",
+    "stream_answer",
+    "parse_response",
 ]

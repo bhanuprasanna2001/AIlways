@@ -12,7 +12,7 @@ Usage::
 """
 
 from app.core.rag.parsing.base import Parser
-from app.core.rag.parsing.pdf import PdfParser
+from app.core.rag.parsing.pdf import PdfParser, _get_pdf_pool
 from app.core.rag.parsing.text import TextParser
 
 _PARSERS: dict[str, type] = {
@@ -41,4 +41,13 @@ def get_parser(file_type: str) -> Parser:
     return cls()
 
 
-__all__ = ["Parser", "PdfParser", "TextParser", "get_parser"]
+def shutdown_pdf_pool() -> None:
+    """Shut down the PDF process pool if it was created."""
+    try:
+        pool = _get_pdf_pool()
+        pool.shutdown(wait=False)
+    except Exception:
+        pass
+
+
+__all__ = ["Parser", "PdfParser", "TextParser", "get_parser", "shutdown_pdf_pool"]

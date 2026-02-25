@@ -37,6 +37,7 @@ class TranscriptionConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TRANSCRIPTION_", env_file=".env", extra="ignore")
 
     SESSION_STALE_TIMEOUT_MINUTES: int = 30
+    STALE_CLEANUP_INTERVAL_MINUTES: int = 30
     DB_FLUSH_INTERVAL_S: float = 2.0
     DB_FLUSH_BATCH_SIZE: int = 50
     MAX_SESSION_DURATION_S: int = 14400
@@ -139,6 +140,12 @@ class Settings(BaseSettings):
     KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS: int = 600000
     KAFKA_RECOVERY_INTERVAL_MINUTES: int = 5
 
+    # Database pool
+    DB_POOL_SIZE: int = 10
+    DB_POOL_MAX_OVERFLOW: int = 20
+    DB_POOL_RECYCLE_S: int = 3600
+    DB_POOL_PRE_PING: bool = True
+
     # External API timeouts
     API_TIMEOUT_S: float = 30.0
     EMBEDDING_TIMEOUT_S: float = 60.0
@@ -154,6 +161,12 @@ class Settings(BaseSettings):
 
     # Sparse search
     SPARSE_SEARCH_MAX_QUERY_LENGTH: int = 500
+
+    # PDF process pool
+    PDF_PARSE_WORKERS: int = 2
+
+    # Embedding cache (Redis-backed query dedup)
+    EMBEDDING_CACHE_TTL_S: float = 300.0
 
     # Grouped sub-configs
     CLAIM: ClaimConfig = ClaimConfig()

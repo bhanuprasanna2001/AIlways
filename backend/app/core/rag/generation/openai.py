@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -108,7 +109,7 @@ class OpenAIGenerator:
                 ]),
                 timeout=SETTINGS.API_TIMEOUT_S,
             )
-            return _parse_response(response.content)
+            return parse_response(response.content)
         except asyncio.TimeoutError:
             logger.error("Generation timed out")
             return _INSUFFICIENT
@@ -116,13 +117,40 @@ class OpenAIGenerator:
             logger.error(f"Generation failed: {e}")
             return _INSUFFICIENT
 
+    async def stream(self, query: str, results: list[SearchResult]) -> AsyncIterator[str]:
+        """Stream raw LLM response tokens.
+
+        Yields each content delta as a string. The caller accumulates
+        the full response and passes it to ``parse_response()`` for
+        structured parsing after the stream ends.
+
+        Falls back to a single yield of the full response on error.
+        """
+        if not query or not query.strip() or not results:
+            yield json.dumps(_INSUFFICIENT.model_dump())
+            return
+
+        context = build_retrieval_context(results)
+        user_message = _USER_TEMPLATE.format(context=context, query=query)
+
+        try:
+            async for chunk in self._llm.astream([
+                SystemMessage(content=_SYSTEM_PROMPT),
+                HumanMessage(content=user_message),
+            ]):
+                if chunk.content:
+                    yield chunk.content
+        except Exception as e:
+            logger.error(f"Streaming generation failed: {e}")
+            yield json.dumps(_INSUFFICIENT.model_dump())
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _parse_response(raw: str) -> AnswerResult:
+def parse_response(raw: str) -> AnswerResult:
     """Parse the LLM JSON response into an AnswerResult."""
     try:
         data = json.loads(raw)

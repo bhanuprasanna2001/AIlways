@@ -1,5 +1,7 @@
 from typing import AsyncGenerator
 from contextlib import asynccontextmanager
+import asyncio
+
 from tenacity import retry, stop_after_attempt, wait_fixed
 
 from fastapi import FastAPI
@@ -49,6 +51,18 @@ async def _cleanup_stale_sessions() -> None:
         logger.info(f"Cleaned up {len(stale)} stale transcription session(s)")
 
 
+async def _periodic_stale_cleanup() -> None:
+    """Run stale session cleanup on a fixed interval while the app is alive."""
+    settings = get_settings()
+    interval = settings.TRANSCRIPTION.STALE_CLEANUP_INTERVAL_MINUTES * 60
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await _cleanup_stale_sessions()
+        except Exception as e:
+            logger.warning(f"Periodic stale session cleanup failed: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan — startup and shutdown."""
@@ -77,9 +91,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except KafkaProducerError as e:
             logger.warning(f"Kafka unavailable — falling back to sync mode: {e}")
 
+    # Periodic stale session cleanup (runs every STALE_CLEANUP_INTERVAL_MINUTES)
+    cleanup_task = asyncio.create_task(_periodic_stale_cleanup())
+
     try:
         yield
     finally:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+
+        # Shut down PDF process pool
+        from app.core.rag.parsing import shutdown_pdf_pool
+        shutdown_pdf_pool()
+
         if app.state.kafka_producer:
             await app.state.kafka_producer.stop()
             logger.info("Kafka producer stopped")

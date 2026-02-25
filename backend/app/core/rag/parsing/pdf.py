@@ -9,14 +9,24 @@ from __future__ import annotations
 import asyncio
 import io
 import re
+from concurrent.futures import ProcessPoolExecutor
 from typing import Any
 
 import pdfplumber
 from pdfplumber.page import Page
 
+from app.core.config import get_settings
+from app.core.utils import singleton
 from app.core.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+
+@singleton
+def _get_pdf_pool() -> ProcessPoolExecutor:
+    """Lazily create a shared process pool for CPU-bound PDF parsing."""
+    settings = get_settings()
+    return ProcessPoolExecutor(max_workers=settings.PDF_PARSE_WORKERS)
 
 
 # ---------------------------------------------------------------------------
@@ -46,8 +56,8 @@ _KV_RE = re.compile(r"^(.+?)\s*:\s+(.+)$")
 class PdfParser:
     """Parses PDF files into markdown using pdfplumber.
 
-    Runs CPU-bound parsing in a thread pool to avoid blocking the
-    event loop.
+    Runs CPU-bound parsing in a process pool to avoid blocking the
+    event loop and bypass the GIL for true parallelism.
     """
 
     async def parse(self, file_content: bytes, filename: str) -> str:
@@ -56,70 +66,73 @@ class PdfParser:
         Raises:
             ValueError: If the PDF cannot be opened or has no content.
         """
-        return await asyncio.to_thread(self._parse_sync, file_content, filename)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _get_pdf_pool(), _parse_pdf_sync, file_content, filename,
+        )
 
-    # -----------------------------------------------------------------------
-    # Synchronous entry point (thread-pool)
-    # -----------------------------------------------------------------------
 
-    def _parse_sync(self, file_content: bytes, filename: str) -> str:
-        """Synchronous PDF parsing — executed in a thread pool.
+# ---------------------------------------------------------------------------
+# Synchronous entry point (process-pool worker)
+# ---------------------------------------------------------------------------
 
-        Raises:
-            ValueError: If the PDF cannot be opened or has no content.
-        """
-        try:
-            pdf_file = io.BytesIO(file_content)
-            with pdfplumber.open(pdf_file, unicode_norm="NFKC") as pdf:
-                pages = pdf.pages
-                tables = _extract_all_tables(pages)
+def _parse_pdf_sync(file_content: bytes, filename: str) -> str:
+    """Synchronous PDF parsing — executed in a process pool worker.
 
-                page_blocks: dict[int, list] = {}
-                for p in pages:
-                    blocks = _extract_text_blocks(p)
-                    if blocks:
-                        page_blocks[p.page_number] = blocks
+    Raises:
+        ValueError: If the PDF cannot be opened or has no content.
+    """
+    try:
+        pdf_file = io.BytesIO(file_content)
+        with pdfplumber.open(pdf_file, unicode_norm="NFKC") as pdf:
+            pages = pdf.pages
+            tables = _extract_all_tables(pages)
 
-                page_tables: dict[int, list[tuple]] = {}
-                for hdr, rows, caption, pr in tables:
-                    page_tables.setdefault(pr[0], []).append((hdr, rows, caption, pr))
+            page_blocks: dict[int, list] = {}
+            for p in pages:
+                blocks = _extract_text_blocks(p)
+                if blocks:
+                    page_blocks[p.page_number] = blocks
 
-                table_y: dict[int, dict[int, float]] = {}
-                for p in pages:
-                    settings = _BORDERED if _is_bordered(p) else _BORDERLESS
-                    tbls = p.find_tables(table_settings=settings)
-                    for i, t in enumerate(tbls):
-                        if t.bbox:
-                            table_y.setdefault(p.page_number, {})[i] = t.bbox[1]
+            page_tables: dict[int, list[tuple]] = {}
+            for hdr, rows, caption, pr in tables:
+                page_tables.setdefault(pr[0], []).append((hdr, rows, caption, pr))
 
-            sections: list[str] = []
-            for pn in sorted(set(list(page_blocks) + list(page_tables))):
-                items: list[tuple[float, str]] = []
+            table_y: dict[int, dict[int, float]] = {}
+            for p in pages:
+                settings = _BORDERED if _is_bordered(p) else _BORDERLESS
+                tbls = p.find_tables(table_settings=settings)
+                for i, t in enumerate(tbls):
+                    if t.bbox:
+                        table_y.setdefault(p.page_number, {})[i] = t.bbox[1]
 
-                for kind, text, y in page_blocks.get(pn, []):
-                    items.append((y, _md_block(kind, text)))
+        sections: list[str] = []
+        for pn in sorted(set(list(page_blocks) + list(page_tables))):
+            items: list[tuple[float, str]] = []
 
-                for idx, (hdr, rows, caption, _) in enumerate(page_tables.get(pn, [])):
-                    y = table_y.get(pn, {}).get(idx, 0.0)
-                    items.append((y, _md_table(hdr, rows, caption)))
+            for kind, text, y in page_blocks.get(pn, []):
+                items.append((y, _md_block(kind, text)))
 
-                items.sort(key=lambda x: x[0])
-                page_md = "\n\n".join(s for _, s in items)
-                if page_md.strip():
-                    sections.append(page_md)
+            for idx, (hdr, rows, caption, _) in enumerate(page_tables.get(pn, [])):
+                y = table_y.get(pn, {}).get(idx, 0.0)
+                items.append((y, _md_table(hdr, rows, caption)))
 
-            result = "\n\n".join(sections) + "\n"
+            items.sort(key=lambda x: x[0])
+            page_md = "\n\n".join(s for _, s in items)
+            if page_md.strip():
+                sections.append(page_md)
 
-            if not result.strip():
-                raise ValueError(f"No text content extracted from PDF: {filename}")
+        result = "\n\n".join(sections) + "\n"
 
-            logger.debug(f"Parsed PDF '{filename}': {len(pages)} page(s), {len(result)} chars")
-            return result
+        if not result.strip():
+            raise ValueError(f"No text content extracted from PDF: {filename}")
 
-        except ValueError:
-            raise
-        except Exception as e:
-            raise ValueError(f"Failed to parse PDF '{filename}': {e}") from e
+        return result
+
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Failed to parse PDF '{filename}': {e}") from e
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@ import hashlib
 from uuid import UUID
 
 from sqlmodel import select, func
-from sqlalchemy import delete as sqlalchemy_delete
+from sqlalchemy import delete as sqlalchemy_delete, text, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile, File, status
 from fastapi.responses import JSONResponse
@@ -80,8 +80,11 @@ async def upload_document(
             detail=f"File exceeds {SETTINGS.MAX_FILE_SIZE_MB}MB limit",
         )
 
-    # Check for duplicate
+    # Check for duplicate — advisory lock serialises concurrent uploads of the same file
     file_hash = hashlib.sha256(content).hexdigest()
+    lock_key = int(hashlib.md5(f"{vault_id}:{file_hash}".encode()).hexdigest()[:15], 16)
+    await db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
+
     existing = await db.execute(
         select(Document).where(
             Document.vault_id == vault_id,
@@ -410,13 +413,11 @@ async def delete_document(
     doc.updated_at = now
     db.add(doc)
 
-    result = await db.execute(
-        select(Chunk).where(Chunk.doc_id == doc_id, Chunk.is_deleted == False)
+    await db.execute(
+        sa_update(Chunk)
+        .where(Chunk.doc_id == doc_id, Chunk.is_deleted == False)
+        .values(is_deleted=True)
     )
-    chunks = result.scalars().all()
-    for chunk in chunks:
-        chunk.is_deleted = True
-        db.add(chunk)
 
     # Touch vault timestamp so "Latest Activity" reflects the deletion
     await touch_vault_updated_at(db, vault_id)
