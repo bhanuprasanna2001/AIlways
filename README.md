@@ -25,7 +25,11 @@
 
 ## Video
 
+<div align="center">
+
 [![AIlways Demo Video](https://img.youtube.com/vi/R7A8SB_S_Z4/0.jpg)](https://www.youtube.com/watch?v=R7A8SB_S_Z4)
+
+</div>
 
 ---
 
