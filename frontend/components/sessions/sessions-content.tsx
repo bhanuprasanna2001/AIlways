@@ -11,6 +11,7 @@ import {
   Users,
   MessageSquare,
   ChevronLeft,
+  ChevronRight,
   CheckCircle2,
   XCircle,
   AlertTriangle,
@@ -26,6 +27,7 @@ import {
 import type {
   TranscriptionSession,
   TranscriptionSessionDetail,
+  TranscriptionClaim,
 } from "@/lib/types";
 import { apiFetch, fetcher } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
@@ -72,6 +74,61 @@ const VERDICT_ICONS: Record<string, React.ReactNode> = {
   contradicted: <XCircle className="h-3.5 w-3.5 text-red-600 dark:text-red-400" />,
   unverifiable: <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />,
 };
+
+// ---------------------------------------------------------------------------
+// Claim card with collapsible sources
+// ---------------------------------------------------------------------------
+
+function SessionClaimCard({ claim }: { claim: TranscriptionClaim }) {
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-neutral-200 px-3 py-2.5 dark:border-neutral-700">
+      <div className="flex items-start gap-2">
+        <span className="mt-0.5">{VERDICT_ICONS[claim.verdict]}</span>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm text-foreground">{claim.text}</p>
+          <div className="mt-1 flex items-center gap-2">
+            <Badge variant={VERDICT_VARIANT[claim.verdict] ?? "neutral"}>
+              {VERDICT_LABELS[claim.verdict] ?? claim.verdict}
+            </Badge>
+            <span className={cn("text-xs", speakerColor(claim.speaker))}>
+              Speaker {claim.speaker + 1}
+            </span>
+          </div>
+          {claim.explanation && (
+            <p className="mt-1.5 text-xs text-neutral-500 dark:text-neutral-400">
+              {claim.explanation}
+            </p>
+          )}
+          {claim.evidence && claim.evidence.length > 0 && (
+            <div className="mt-2">
+              <button
+                onClick={() => setSourcesOpen(!sourcesOpen)}
+                className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-neutral-400 transition-colors hover:text-neutral-600 dark:hover:text-neutral-300"
+              >
+                <ChevronRight
+                  className={cn(
+                    "h-3 w-3 transition-transform",
+                    sourcesOpen && "rotate-90",
+                  )}
+                />
+                Sources ({claim.evidence.length})
+              </button>
+              {sourcesOpen && (
+                <div className="mt-1.5 space-y-1.5">
+                  {claim.evidence.map((cit, idx) => (
+                    <CitationCard key={idx} citation={cit} index={idx} />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Session detail view
@@ -183,54 +240,13 @@ function SessionDetail({
 
         {/* Claims */}
         {session.claims.length > 0 && (
-          <div className="w-80 shrink-0 overflow-hidden border-l border-neutral-200 pl-6 dark:border-neutral-800">
+          <div className="w-80 shrink-0 overflow-y-auto border-l border-neutral-200 pl-6 dark:border-neutral-800">
             <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-neutral-400">
               Claims ({session.claim_count})
             </h3>
             <div className="space-y-2">
-              {session.claims.map((claim) => (
-                <div
-                  key={claim.id}
-                  className="overflow-hidden rounded-lg border border-neutral-200 px-3 py-2.5 dark:border-neutral-700"
-                >
-                  <div className="flex items-start gap-2">
-                    <span className="mt-0.5">
-                      {VERDICT_ICONS[claim.verdict]}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm text-foreground">{claim.text}</p>
-                      <div className="mt-1 flex items-center gap-2">
-                        <Badge
-                          variant={
-                            VERDICT_VARIANT[claim.verdict] ?? "neutral"
-                          }
-                        >
-                          {VERDICT_LABELS[claim.verdict] ?? claim.verdict}
-                        </Badge>
-                        <span
-                          className={cn("text-xs", speakerColor(claim.speaker))}
-                        >
-                          Speaker {claim.speaker + 1}
-                        </span>
-                      </div>
-                      {claim.explanation && (
-                        <p className="mt-1.5 text-xs text-neutral-500 dark:text-neutral-400">
-                          {claim.explanation}
-                        </p>
-                      )}
-                      {claim.evidence && claim.evidence.length > 0 && (
-                        <div className="mt-2 space-y-1.5">
-                          <p className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400">
-                            Sources ({claim.evidence.length})
-                          </p>
-                          {claim.evidence.map((cit, idx) => (
-                            <CitationCard key={idx} citation={cit} index={idx} />
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
+              {[...session.claims].reverse().map((claim) => (
+                <SessionClaimCard key={claim.id} claim={claim} />
               ))}
             </div>
           </div>

@@ -237,12 +237,15 @@ async def retrieve_node(state: VerificationState) -> dict:
 
 
 async def aggregate_retrieve_node(state: VerificationState) -> dict:
-    """Retrieve documents for AGGREGATE queries using exhaustive multi-pass search.
+    """Retrieve documents for AGGREGATE queries using SQL metadata + hybrid fallback.
 
-    Uses high top_k and multiple search strategies:
-      1. Hybrid search with full statement (high top_k)
-      2. Targeted keyword search (date filters, entity types)
-      3. Fetch ALL chunks from matched document IDs for completeness
+    Strategy:
+      1. Parse date range and document type from the statement.
+      2. If metadata fields are available, do a precise SQL query on
+         ``Document.order_date``, ``Document.document_type``, etc.
+      3. Fetch ALL chunks from matching document IDs.
+      4. If SQL yields nothing (metadata not yet backfilled), fall back
+         to the original multi-pass hybrid search.
     """
     statement = state["statement_text"]
     vault_id = UUID(state["vault_id"])
@@ -256,6 +259,59 @@ async def aggregate_retrieve_node(state: VerificationState) -> dict:
             if r.chunk_id not in seen_ids:
                 seen_ids.add(r.chunk_id)
                 all_results.append(r)
+
+    # ------------------------------------------------------------------
+    # Step 1: Try SQL metadata filter (precise, zero false-negatives)
+    # ------------------------------------------------------------------
+    sql_doc_ids = await _sql_metadata_filter(statement, vault_id)
+
+    if sql_doc_ids:
+        # Fetch ALL chunks from matched documents
+        async with get_db_session() as db:
+            chunk_stmt = (
+                select(Chunk)
+                .where(Chunk.doc_id.in_(sql_doc_ids))
+                .where(Chunk.vault_id == vault_id)
+                .where(Chunk.is_deleted == False)  # noqa: E712
+                .order_by(Chunk.doc_id, Chunk.chunk_index)
+            )
+            result = await db.execute(chunk_stmt)
+            chunks = result.scalars().all()
+
+        for chunk in chunks:
+            if chunk.id not in seen_ids:
+                seen_ids.add(chunk.id)
+                all_results.append(SearchResult(
+                    chunk_id=chunk.id,
+                    doc_id=chunk.doc_id,
+                    content=chunk.content,
+                    content_with_header=chunk.content_with_header,
+                    score=1.0,
+                    section_heading=chunk.section_heading,
+                    page_number=chunk.page_number,
+                    original_filename=None,
+                ))
+
+        logger.info(
+            "Verification retrieve (aggregate/SQL): statement='%s', "
+            "sql_docs=%d, chunks=%d",
+            statement[:50], len(sql_doc_ids), len(all_results),
+        )
+
+        return {
+            "search_results": [r.model_dump(mode="json") for r in all_results],
+            "search_query": statement,
+            "search_attempts": 1,
+            "is_relevant": len(all_results) > 0,
+        }
+
+    # ------------------------------------------------------------------
+    # Step 2: Fallback — multi-pass hybrid search (metadata not available)
+    # ------------------------------------------------------------------
+    logger.info(
+        "Verification retrieve (aggregate/hybrid-fallback): statement='%s'",
+        statement[:50],
+    )
 
     # Pass 1: Hybrid search with full statement
     search_text = normalize_numbers(statement)
@@ -320,7 +376,7 @@ async def aggregate_retrieve_node(state: VerificationState) -> dict:
                 ))
 
     logger.info(
-        "Verification retrieve (aggregate): statement='%s', results=%d",
+        "Verification retrieve (aggregate/hybrid): statement='%s', results=%d",
         statement[:50], len(all_results),
     )
 
@@ -677,6 +733,93 @@ _MONTH_MAP = {
     "november": "11", "nov": "11",
     "december": "12", "dec": "12",
 }
+
+
+async def _sql_metadata_filter(
+    statement: str,
+    vault_id: UUID,
+) -> list[UUID]:
+    """Use Document metadata fields for precise SQL filtering.
+
+    Parses document_type and date range from the statement, then queries
+    the ``documents`` table. Returns a list of matching doc IDs, or an
+    empty list if metadata isn't populated or no criteria could be parsed.
+    """
+    from datetime import date as date_type
+    from calendar import monthrange
+
+    text_lower = statement.lower()
+
+    # Parse document type
+    doc_type: str | None = None
+    type_map = {
+        "invoice": "invoice",
+        "purchase order": "purchase_order",
+        "shipping order": "shipping_order",
+        "stock report": "stock_report",
+        "inventory report": "stock_report",
+    }
+    for keyword, dtype in type_map.items():
+        if keyword in text_lower:
+            doc_type = dtype
+            break
+
+    # Parse date range (month+year, year-only, quarter)
+    date_start: date_type | None = None
+    date_end: date_type | None = None
+
+    year_match = re.search(r"\b(20\d{2})\b", statement)
+    year = int(year_match.group(1)) if year_match else None
+
+    if year:
+        month_num: int | None = None
+        for month_name, m_str in _MONTH_MAP.items():
+            if month_name in text_lower:
+                month_num = int(m_str)
+                break
+
+        q_match = re.search(r"\bq([1-4])\b", text_lower)
+
+        if month_num:
+            _, last_day = monthrange(year, month_num)
+            date_start = date_type(year, month_num, 1)
+            date_end = date_type(year, month_num, last_day)
+        elif q_match:
+            quarter = int(q_match.group(1))
+            start_month = (quarter - 1) * 3 + 1
+            end_month = start_month + 2
+            _, last_day = monthrange(year, end_month)
+            date_start = date_type(year, start_month, 1)
+            date_end = date_type(year, end_month, last_day)
+        else:
+            date_start = date_type(year, 1, 1)
+            date_end = date_type(year, 12, 31)
+
+    # Must have at least one filter criterion
+    if not doc_type and not date_start:
+        return []
+
+    # Build and execute query
+    async with get_db_session() as db:
+        stmt = select(Document.id).where(
+            Document.vault_id == vault_id,
+            Document.deleted_at.is_(None),  # type: ignore[union-attr]
+        )
+        if doc_type:
+            stmt = stmt.where(Document.document_type == doc_type)
+        if date_start and date_end:
+            stmt = stmt.where(Document.order_date >= date_start)
+            stmt = stmt.where(Document.order_date <= date_end)
+
+        result = await db.execute(stmt)
+        doc_ids = list(result.scalars().all())
+
+    if doc_ids:
+        logger.info(
+            "SQL metadata filter matched %d documents for: '%s'",
+            len(doc_ids), statement[:60],
+        )
+    return doc_ids
 
 
 def _extract_date_keywords(text: str) -> list[str]:

@@ -434,7 +434,6 @@ export function useTranscription() {
 
       case "claim_detected":
         setClaims((prev) => [
-          ...prev,
           {
             id: msg.claim_id,
             text: msg.text,
@@ -444,6 +443,7 @@ export function useTranscription() {
             explanation: "",
             evidence: [],
           },
+          ...prev,
         ]);
         break;
 

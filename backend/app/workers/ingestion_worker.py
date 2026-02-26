@@ -10,7 +10,7 @@ from app.core.kafka.topics import (
 )
 from app.core.utils import utcnow_aware
 from app.core.storage.local import LocalFileStore
-from app.core.rag.ingest import ingest_document, prepare_document, batch_embed_and_store
+from app.core.rag.ingest import ingest_document, prepare_document, enrich_prepared_docs, batch_embed_and_store
 from app.core.rag.embedding import get_embedder
 from app.db.models import Document, Vault
 from app.workers.base import BaseWorker
@@ -104,11 +104,15 @@ class IngestionWorker(BaseWorker):
         if not prepared_docs:
             return
 
-        # 3. Batch embed + store ALL chunks in one API call
+        # 3. Run LLM metadata extraction concurrently for all docs
+        #    (summary, keywords, HyDE questions — ~7s total regardless of batch size)
+        await enrich_prepared_docs(prepared_docs)
+
+        # 4. Batch embed + store ALL chunks in one API call
         embedder = get_embedder()
         results = await batch_embed_and_store(prepared_docs, db, embedder)
 
-        # 4. Produce audit events for successfully stored documents
+        # 5. Produce audit events for successfully stored documents
         for doc_id, chunk_count in results.items():
             parsed_event = audit_metadata.get(doc_id)
             if not parsed_event:

@@ -49,7 +49,7 @@ class CopilotConfig(BaseSettings):
     VERIFICATION_MODEL: str = ""  # defaults to OPENAI_QUERY_MODEL if empty
     VERIFICATION_TEMPERATURE: float = 0.0
     VERIFICATION_TOP_K: int = 8
-    VERIFICATION_AGGREGATE_TOP_K: int = 30
+    VERIFICATION_AGGREGATE_TOP_K: int = 50
     VERIFICATION_MAX_SEARCH_ATTEMPTS: int = 3
     VERIFICATION_MMR_LAMBDA: float = 1.0
 
@@ -60,7 +60,11 @@ class CopilotConfig(BaseSettings):
     # Query agent — ReAct agent for copilot chat
     AGENT_MODEL: str = ""  # defaults to OPENAI_REASONING_MODEL if empty
     AGENT_TEMPERATURE: float = 0.1
-    AGENT_MAX_ITERATIONS: int = 5
+    AGENT_MAX_ITERATIONS: int = 6
+    AGENT_MAX_FULL_DOC_CALLS: int = 3
+
+    # filter_documents tool — SQL-backed structured query
+    FILTER_DOCUMENTS_MAX_RESULTS: int = 100
 
 
 class TranscriptionConfig(BaseSettings):
@@ -75,6 +79,32 @@ class TranscriptionConfig(BaseSettings):
     SESSION_TITLE_MAX_LENGTH: int = 255
     WS_TICKET_TTL_S: int = 60
     MAX_AUDIO_SIZE_MB: int = 100
+
+
+class MetadataConfig(BaseSettings):
+    """Document metadata extraction settings.
+
+    Controls LLM-based metadata extraction at ingestion time.
+    The extractor produces: summary, keywords, hypothetical questions
+    (HyDE), document_type, entity_id, and structured entities.
+    A synthetic "metadata chunk" is created per document for HyDE
+    retrieval — it participates in ALL existing search paths.
+    """
+    model_config = SettingsConfigDict(env_prefix="METADATA_", env_file=".env", extra="ignore")
+
+    # LLM extraction — set ENABLED=false for zero-cost regex-only fallback
+    ENABLED: bool = True
+    MODEL: str = ""  # defaults to OPENAI_QUERY_MODEL if empty
+    TEMPERATURE: float = 0.0
+    MAX_RETRIES: int = 2
+
+    # Content truncation — first N chars sent to the LLM for extraction
+    MAX_CONTENT_CHARS: int = 8000
+
+    # Output sizing
+    SUMMARY_MAX_WORDS: int = 80
+    KEYWORDS_COUNT: int = 8
+    HYPOTHETICAL_QUESTIONS_COUNT: int = 3
 
 
 class WorkerConfig(BaseSettings):
@@ -172,8 +202,8 @@ class Settings(BaseSettings):
     # Entity-aware retrieval — direct SQL lookup for entity IDs
     # (invoice numbers, order numbers) before embedding search.
     ENTITY_SEARCH_ENABLED: bool = True
-    ENTITY_SEARCH_MAX_IDS: int = 3
-    ENTITY_SEARCH_LIMIT: int = 10
+    ENTITY_SEARCH_MAX_IDS: int = 10
+    ENTITY_SEARCH_LIMIT: int = 20
 
     # Kafka / Redpanda
     KAFKA_BOOTSTRAP_SERVERS: str = "localhost:19092"
@@ -214,6 +244,7 @@ class Settings(BaseSettings):
     # Grouped sub-configs
     CLAIM: ClaimConfig = ClaimConfig()
     COPILOT: CopilotConfig = CopilotConfig()
+    METADATA: MetadataConfig = MetadataConfig()
     TRANSCRIPTION: TranscriptionConfig = TranscriptionConfig()
     WORKER: WorkerConfig = WorkerConfig()
 

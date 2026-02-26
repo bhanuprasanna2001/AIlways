@@ -12,6 +12,7 @@ import {
   AlertTriangle,
   Loader2,
   Monitor,
+  ChevronRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { VERDICT_LABELS, VERDICT_VARIANT } from "@/lib/constants";
@@ -112,6 +113,8 @@ function SegmentList({ segments }: { segments: LiveSegment[] }) {
 }
 
 function ClaimCard({ claim }: { claim: LiveClaim }) {
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+
   return (
     <div className="overflow-hidden rounded-lg border border-neutral-200 px-3 py-2.5 dark:border-neutral-700">
       <div className="flex items-start gap-2">
@@ -137,13 +140,26 @@ function ClaimCard({ claim }: { claim: LiveClaim }) {
             </p>
           )}
           {claim.evidence && claim.evidence.length > 0 && (
-            <div className="mt-2 space-y-1.5">
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400">
+            <div className="mt-2">
+              <button
+                onClick={() => setSourcesOpen(!sourcesOpen)}
+                className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-neutral-400 transition-colors hover:text-neutral-600 dark:hover:text-neutral-300"
+              >
+                <ChevronRight
+                  className={cn(
+                    "h-3 w-3 transition-transform",
+                    sourcesOpen && "rotate-90",
+                  )}
+                />
                 Sources ({claim.evidence.length})
-              </p>
-              {claim.evidence.map((cit, idx) => (
-                <CitationCard key={idx} citation={cit} index={idx} />
-              ))}
+              </button>
+              {sourcesOpen && (
+                <div className="mt-1.5 space-y-1.5">
+                  {claim.evidence.map((cit, idx) => (
+                    <CitationCard key={idx} citation={cit} index={idx} />
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
