@@ -15,6 +15,7 @@ import asyncio
 from uuid import UUID
 
 from fastapi import WebSocket
+from sqlmodel import select
 
 from app.core.copilot import extract_statements, verify_statement
 from app.core.copilot.base import Statement
@@ -23,6 +24,8 @@ from app.core.transcription.buffer import TranscriptBuffer
 from app.core.transcription.persistence import SessionPersistence
 from app.core.config import get_settings
 from app.core.logger import setup_logger
+from app.db import get_db_session
+from app.db.models.vault import Vault
 
 from app.api.routers.transcription.schemas import (
     WSClaimDetectedMessage,
@@ -32,6 +35,13 @@ from app.api.routers.transcription.schemas import (
 logger = setup_logger(__name__)
 
 SETTINGS = get_settings()
+
+
+async def _get_vault_updated_at(vault_id: UUID) -> str | None:
+    async with get_db_session() as db:
+        result = await db.execute(select(Vault.updated_at).where(Vault.id == vault_id))
+        updated_at = result.scalar_one_or_none()
+    return updated_at.isoformat() if updated_at else None
 
 
 def spawn_claim_task(
@@ -117,10 +127,18 @@ async def process_statements_batch(
                     ws_alive = False
 
         # 5. Verify all statements concurrently via LangGraph CRAG graph
+        vault_updated_at: str | None = None
+        if SETTINGS.COPILOT.VERIFICATION_CACHE_ENABLED:
+            vault_updated_at = await _get_vault_updated_at(vault_id)
+
         async def _verify_one(stmt: Statement):
             try:
                 return await asyncio.wait_for(
-                    verify_statement(stmt, vault_id),
+                    verify_statement(
+                        stmt,
+                        vault_id,
+                        vault_updated_at=vault_updated_at,
+                    ),
                     timeout=SETTINGS.API_TIMEOUT_S,
                 )
             except asyncio.TimeoutError:
@@ -163,6 +181,9 @@ async def process_statements_batch(
                         confidence=verdict.confidence,
                         explanation=verdict.explanation,
                         evidence=verdict.evidence,
+                        verification_path=verdict.verification_path,
+                        latency_ms=verdict.latency_ms,
+                        cache_hit=verdict.cache_hit,
                     )
                     await websocket.send_json(msg.model_dump())
                 except Exception:

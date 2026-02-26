@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from collections.abc import AsyncIterator
 from typing import Annotated, TypedDict
 from uuid import UUID
@@ -51,42 +50,13 @@ from app.core.copilot.tools import COPILOT_TOOLS
 from app.core.copilot.prompts import AGENT_SYSTEM
 from app.core.copilot.base import CopilotAnswer, Evidence
 from app.core.rag.query import rewrite_query, extract_entity_ids
+from app.core.copilot.classification import classify_query_type
 from app.core.config import get_settings
 from app.core.logger import setup_logger
 
 logger = setup_logger(__name__)
 
 SETTINGS = get_settings()
-
-
-# ---------------------------------------------------------------------------
-# Query classification — reused from verification, rule-based, zero latency
-# ---------------------------------------------------------------------------
-
-_AGGREGATE_RE = re.compile(
-    r"\ball\b.*\b(?:invoice|order|report|document|item|product|shipping|purchase)"
-    r"|\btotal\b.*\b(?:price|cost|amount|value|number|count|quantity|items)\b.*\b(?:of all|from|in|for|during)\b"
-    r"|\bhow many\b"
-    r"|\blist\b.*\b(?:every|all|each)\b"
-    r"|\bevery\b"
-    r"|\bcount\b.*\b(?:of|all|the)\b"
-    r"|\b(?:invoices?|orders?|reports?|documents?|items?|products?)\b.*\b(?:from|in|of|during|for)\b.*\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december|20\d{2}|q[1-4])\b",
-    re.IGNORECASE,
-)
-
-_COMPUTE_RE = re.compile(
-    r"\b(?:total|sum|average|avg|calculate|compute|add up|combined)\b",
-    re.IGNORECASE,
-)
-
-
-def _classify_query(query: str) -> str:
-    """Classify a query as aggregate, compute, or point. Zero latency."""
-    if _AGGREGATE_RE.search(query):
-        if _COMPUTE_RE.search(query):
-            return "compute"
-        return "aggregate"
-    return "point"
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +324,7 @@ def _build_messages(
                 messages.append(HumanMessage(content=content))
 
     # Classify and inject planning hint
-    query_type = _classify_query(rewritten_query)
+    query_type = classify_query_type(rewritten_query)
     hint = _PLANNING_HINTS.get(query_type, "")
     if hint:
         messages.append(SystemMessage(content=hint))

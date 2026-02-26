@@ -25,6 +25,9 @@ export type LiveClaim = {
   confidence: number;
   explanation: string;
   evidence: Citation[];
+  verification_path?: string | null;
+  latency_ms?: number | null;
+  cache_hit?: boolean;
 };
 
 export type TranscriptionStatus =
@@ -67,6 +70,9 @@ type WSClaimVerified = {
   confidence: number;
   explanation: string;
   evidence: Citation[];
+  verification_path?: string | null;
+  latency_ms?: number | null;
+  cache_hit?: boolean;
 };
 
 type WSSessionStarted = {
@@ -442,6 +448,9 @@ export function useTranscription() {
             confidence: 0,
             explanation: "",
             evidence: [],
+            verification_path: null,
+            latency_ms: null,
+            cache_hit: false,
           },
           ...prev,
         ]);
@@ -457,6 +466,9 @@ export function useTranscription() {
                   confidence: msg.confidence,
                   explanation: msg.explanation,
                   evidence: msg.evidence,
+                  verification_path: msg.verification_path ?? null,
+                  latency_ms: msg.latency_ms ?? null,
+                  cache_hit: msg.cache_hit ?? false,
                 }
               : c,
           ),

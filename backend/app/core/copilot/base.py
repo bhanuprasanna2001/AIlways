@@ -64,6 +64,9 @@ class Verdict(BaseModel):
     confidence: float
     explanation: str
     evidence: list[Evidence] = []
+    verification_path: str | None = None
+    latency_ms: int | None = None
+    cache_hit: bool = False
 
 
 # ---------------------------------------------------------------------------

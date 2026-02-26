@@ -45,6 +45,9 @@ class ClaimVerdictResponse(BaseModel):
     confidence: float
     explanation: str
     evidence: list[Evidence] = []
+    verification_path: str | None = None
+    latency_ms: int | None = None
+    cache_hit: bool = False
 
 
 class TranscriptionResponse(BaseModel):
@@ -104,6 +107,9 @@ class SessionClaimResponse(BaseModel):
     confidence: float
     explanation: str | None
     evidence: list[Evidence] = []
+    verification_path: str | None = None
+    latency_ms: int | None = None
+    cache_hit: bool = False
 
 
 class SessionDetailResponse(BaseModel):
@@ -176,6 +182,9 @@ class WSClaimVerifiedMessage(BaseModel):
     confidence: float
     explanation: str
     evidence: list[Evidence] = []
+    verification_path: str | None = None
+    latency_ms: int | None = None
+    cache_hit: bool = False
 
 
 class WSSessionStartedMessage(BaseModel):

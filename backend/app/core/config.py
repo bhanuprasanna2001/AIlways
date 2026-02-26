@@ -52,6 +52,13 @@ class CopilotConfig(BaseSettings):
     VERIFICATION_AGGREGATE_TOP_K: int = 50
     VERIFICATION_MAX_SEARCH_ATTEMPTS: int = 3
     VERIFICATION_MMR_LAMBDA: float = 1.0
+    VERIFICATION_CACHE_ENABLED: bool = True
+    VERIFICATION_CACHE_TTL_S: float = 300.0
+    AGGREGATE_FASTPATH_ENABLED: bool = True
+    AGGREGATE_FALLBACK_ENABLED: bool = False
+    AGGREGATE_REQUIRE_COMPLETE_METADATA: bool = True
+    AGGREGATE_LIST_MAX_DOCS: int = 50
+    AGGREGATE_EVIDENCE_MAX_DOCS: int = 50
 
     # Grading — fast model to grade retrieval relevance before synthesis
     GRADING_MODEL: str = ""  # defaults to OPENAI_QUERY_MODEL if empty

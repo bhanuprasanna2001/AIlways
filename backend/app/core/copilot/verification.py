@@ -5,11 +5,11 @@ before choosing a retrieval strategy:
 
     classify -> route
         -> point:     retrieve(top_k) -> grade -> [retry?] -> synthesise -> END
-        -> aggregate:  exhaustive_retrieve(top_k=30) -> synthesise -> END
+        -> aggregate: aggregate_fast(SQL) -> END (optional fallback: retrieve -> synthesise)
 
 Key design decisions:
-  - Aggregate queries ("all invoices from July 2016") use high top_k
-    to capture ALL matching documents, not just a sample.
+  - Aggregate queries ("all invoices from July 2016") use a deterministic
+    SQL fast path for exact counts and low latency.
   - Point queries use the corrective-RAG loop with transform + retry.
   - Classification is rule-based (no LLM call) for zero latency.
 """
@@ -19,13 +19,16 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import hashlib
+import time
 from typing import Literal, TypedDict
 from uuid import UUID
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, START, END
-from sqlmodel import select
+from sqlmodel import select, col
+from sqlalchemy import func
 
 from app.core.copilot.base import Statement, Evidence, Verdict
 from app.core.copilot.prompts import (
@@ -40,43 +43,38 @@ from app.core.rag.embedding import get_embedder
 from app.core.rag.retrieval import hybrid_search, entity_id_search
 from app.core.rag.retrieval.base import SearchResult, build_retrieval_context
 from app.core.utils import normalize_numbers
+from app.core.copilot.classification import classify_query_type, infer_aggregate_intent
+from app.core.copilot.filters import (
+    parse_document_type,
+    parse_date_range,
+    parse_customer_id,
+    build_filter_description,
+)
 from app.core.config import get_settings
 from app.core.logger import setup_logger
 from app.db import get_db_session
 from app.db.models.chunk import Chunk
 from app.db.models.document import Document
+from app.db.models.vault import Vault
+from app.core.tools.redis import get_redis_client
 
 logger = setup_logger(__name__)
 
 SETTINGS = get_settings()
 
 
-# ---------------------------------------------------------------------------
-# Statement classification — rule-based, zero latency
-# ---------------------------------------------------------------------------
-
-_AGGREGATE_PATTERNS = [
-    r"\ball\b.*\b(?:invoice|order|report|document|item|product|shipping|purchase)",
-    r"\btotal\b.*\b(?:price|cost|amount|value|number|count|quantity|items)\b.*\b(?:of all|from|in|for|during)\b",
-    r"\bhow many\b",
-    r"\blist\b.*\b(?:every|all|each)\b",
-    r"\bevery\b",
-    r"\b(?:invoices?|orders?|reports?|documents?|items?|products?)\b.*\b(?:from|in|of|during|for)\b.*\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december|20\d{2}|q[1-4])\b",
-    r"\btypes of documents\b",
-    r"\bwhat.*(?:do we have|exist|available)\b",
-    r"\b(?:stock|inventory)\b.*\breport",
-    r"\b(?:exist|available)\b.*\b(?:in the vault|in the database)\b",
-]
-
-_AGGREGATE_RE = re.compile("|".join(_AGGREGATE_PATTERNS), re.IGNORECASE)
-
-
 def classify_statement(text: str) -> Literal["point", "aggregate"]:
     """Classify a statement as point or aggregate. Rule-based, zero latency."""
-    normalized = normalize_numbers(text.lower())
-    if _AGGREGATE_RE.search(normalized):
+    qtype = classify_query_type(text)
+    if qtype in ("aggregate", "compute"):
         return "aggregate"
     return "point"
+
+
+_DOC_INVENTORY_RE = re.compile(
+    r"\b(?:types of documents|what documents|what do we have|documents available)\b",
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +97,8 @@ class VerificationState(TypedDict):
     search_results: list[dict]  # serialised SearchResult dicts
     search_attempts: int
     is_relevant: bool
+    aggregate_fallback: bool
+    verification_path: str
     verdict: str
     confidence: float
     explanation: str
@@ -233,6 +233,147 @@ async def retrieve_node(state: VerificationState) -> dict:
         "search_results": [r.model_dump(mode="json") for r in results],
         "search_query": search_text,
         "search_attempts": attempts + 1,
+        "verification_path": "crag",
+    }
+
+
+async def aggregate_fast_node(state: VerificationState) -> dict:
+    """Deterministic aggregate verification using SQL + metadata evidence.
+
+    Avoids LLM calls for speed and exactness. If metadata is incomplete,
+    returns unverifiable unless fallback is explicitly enabled.
+    """
+    statement = state["statement_text"]
+    vault_id = UUID(state["vault_id"])
+
+    if not SETTINGS.COPILOT.AGGREGATE_FASTPATH_ENABLED:
+        if SETTINGS.COPILOT.AGGREGATE_FALLBACK_ENABLED:
+            return {"aggregate_fallback": True}
+        return _unverifiable_response("Aggregate fast path is disabled.", "aggregate_fast")
+
+    intent = infer_aggregate_intent(statement)
+    doc_type = parse_document_type(statement)
+    date_from, date_to = parse_date_range(statement)
+    customer_id = parse_customer_id(statement)
+
+    has_filters = bool(doc_type or date_from or customer_id)
+    if not has_filters:
+        if _DOC_INVENTORY_RE.search(statement):
+            return await _document_type_inventory_verdict(vault_id)
+        if SETTINGS.COPILOT.AGGREGATE_FALLBACK_ENABLED:
+            return {"aggregate_fallback": True}
+        return _unverifiable_response(
+            "No structured filters could be parsed from the statement.",
+            "aggregate_fast",
+        )
+
+    gaps = await _aggregate_metadata_gaps(
+        vault_id=vault_id,
+        doc_type=doc_type,
+        date_from=date_from,
+        date_to=date_to,
+        customer_id=customer_id,
+        intent=intent,
+    )
+    if gaps and SETTINGS.COPILOT.AGGREGATE_REQUIRE_COMPLETE_METADATA:
+        if SETTINGS.COPILOT.AGGREGATE_FALLBACK_ENABLED:
+            return {"aggregate_fallback": True}
+        return _unverifiable_response(
+            _format_metadata_gap_explanation(gaps, doc_type, date_from, date_to, customer_id),
+            "aggregate_fast",
+        )
+    if gaps and intent in ("sum", "average"):
+        if SETTINGS.COPILOT.AGGREGATE_FALLBACK_ENABLED:
+            return {"aggregate_fallback": True}
+        return _unverifiable_response(
+            _format_metadata_gap_explanation(gaps, doc_type, date_from, date_to, customer_id),
+            "aggregate_fast",
+        )
+
+    list_limit = max(
+        SETTINGS.COPILOT.AGGREGATE_LIST_MAX_DOCS,
+        SETTINGS.COPILOT.AGGREGATE_EVIDENCE_MAX_DOCS,
+    )
+    docs, total_count = await _fetch_aggregate_documents(
+        vault_id=vault_id,
+        doc_type=doc_type,
+        date_from=date_from,
+        date_to=date_to,
+        customer_id=customer_id,
+        limit=list_limit,
+    )
+
+    filter_desc = build_filter_description(doc_type, date_from, date_to, customer_id)
+    logger.info(
+        "Verification aggregate fast: statement='%s', filters='%s', count=%d",
+        statement[:50],
+        filter_desc,
+        total_count,
+    )
+
+    if total_count == 0:
+        explanation = (
+            f"No documents found matching: {filter_desc}.\n"
+            "Count: 0"
+        )
+        return {
+            "verdict": "supported",
+            "confidence": 1.0,
+            "explanation": explanation,
+            "evidence": [],
+            "aggregate_fallback": False,
+            "verification_path": "aggregate_fast",
+        }
+
+    if intent in ("sum", "average"):
+        total_sum = await _sum_total_price(
+            vault_id=vault_id,
+            doc_type=doc_type,
+            date_from=date_from,
+            date_to=date_to,
+            customer_id=customer_id,
+        )
+        if total_sum is None:
+            if SETTINGS.COPILOT.AGGREGATE_FALLBACK_ENABLED:
+                return {"aggregate_fallback": True}
+            return _unverifiable_response(
+                "One or more documents are missing total prices for this query.",
+                "aggregate_fast",
+            )
+
+        avg = (total_sum / total_count) if total_count else 0.0
+        value = avg if intent == "average" else total_sum
+        label = "Average Total" if intent == "average" else "Total Sum"
+
+        explanation = _format_aggregate_explanation(
+            filter_desc=filter_desc,
+            total_count=total_count,
+            docs=docs,
+            value=value,
+            value_label=label,
+        )
+    else:
+        explanation = _format_aggregate_explanation(
+            filter_desc=filter_desc,
+            total_count=total_count,
+            docs=docs,
+            value=None,
+            value_label=None,
+        )
+
+    evidence = await _build_aggregate_evidence(
+        vault_id=vault_id,
+        docs=docs,
+        max_docs=SETTINGS.COPILOT.AGGREGATE_EVIDENCE_MAX_DOCS,
+    )
+
+    return {
+        "verdict": "supported",
+        "confidence": 1.0,
+        "explanation": explanation,
+        "evidence": evidence,
+        "aggregate_fallback": False,
+        "verification_path": "aggregate_fast",
     }
 
 
@@ -303,6 +444,7 @@ async def aggregate_retrieve_node(state: VerificationState) -> dict:
             "search_query": statement,
             "search_attempts": 1,
             "is_relevant": len(all_results) > 0,
+            "verification_path": "aggregate_fallback",
         }
 
     # ------------------------------------------------------------------
@@ -385,6 +527,7 @@ async def aggregate_retrieve_node(state: VerificationState) -> dict:
         "search_query": search_text,
         "search_attempts": 1,
         "is_relevant": len(all_results) > 0,
+        "verification_path": "aggregate_fallback",
     }
 
 
@@ -547,7 +690,7 @@ async def synthesise_node(state: VerificationState) -> dict:
 def route_by_type(state: VerificationState) -> str:
     """Route to the appropriate retrieval strategy based on statement type."""
     if state.get("statement_type") == "aggregate":
-        return "aggregate_retrieve"
+        return "aggregate_fast"
     return "retrieve"
 
 
@@ -567,6 +710,13 @@ def should_retry(state: VerificationState) -> str:
     return "synthesise"
 
 
+def route_aggregate_fast(state: VerificationState) -> str:
+    """Route aggregate fast-path to END or fallback retrieval."""
+    if state.get("aggregate_fallback"):
+        return "fallback"
+    return "done"
+
+
 # ---------------------------------------------------------------------------
 # Graph construction
 # ---------------------------------------------------------------------------
@@ -581,14 +731,17 @@ def build_verification_graph() -> StateGraph:
                 retrieve -> grade -> [should_retry?]
                     -> "transform": transform -> retrieve -> grade -> ...
                     -> "synthesise": synthesise -> END
-            -> "aggregate_retrieve" (aggregate):
-                aggregate_retrieve -> synthesise -> END
+            -> "aggregate_fast" (aggregate):
+                aggregate_fast -> [route_aggregate_fast]
+                    -> done: END
+                    -> fallback: aggregate_retrieve -> synthesise -> END
     """
     graph = StateGraph(VerificationState)
 
     # Add nodes
     graph.add_node("classify", classify_node)
     graph.add_node("retrieve", retrieve_node)
+    graph.add_node("aggregate_fast", aggregate_fast_node)
     graph.add_node("aggregate_retrieve", aggregate_retrieve_node)
     graph.add_node("grade", grade_node)
     graph.add_node("transform", transform_node)
@@ -599,7 +752,7 @@ def build_verification_graph() -> StateGraph:
     graph.add_conditional_edges(
         "classify",
         route_by_type,
-        {"retrieve": "retrieve", "aggregate_retrieve": "aggregate_retrieve"},
+        {"retrieve": "retrieve", "aggregate_fast": "aggregate_fast"},
     )
 
     # Point path: retrieve -> grade -> [retry?] -> synthesise
@@ -611,7 +764,12 @@ def build_verification_graph() -> StateGraph:
     )
     graph.add_edge("transform", "retrieve")
 
-    # Aggregate path: aggregate_retrieve -> synthesise (no grading)
+    # Aggregate path: deterministic fast path, optional fallback to LLM
+    graph.add_conditional_edges(
+        "aggregate_fast",
+        route_aggregate_fast,
+        {"done": END, "fallback": "aggregate_retrieve"},
+    )
     graph.add_edge("aggregate_retrieve", "synthesise")
 
     # Terminal
@@ -639,6 +797,7 @@ def get_verification_graph():
 async def verify_statement(
     statement: Statement,
     vault_id: UUID,
+    vault_updated_at: str | None = None,
 ) -> Verdict:
     """Verify a single statement against vault documents.
 
@@ -652,7 +811,23 @@ async def verify_statement(
     Returns:
         Verdict: Verification result with evidence and explanation.
     """
+    start = time.monotonic()
     graph = get_verification_graph()
+
+    cache_key: str | None = None
+    if SETTINGS.COPILOT.VERIFICATION_CACHE_ENABLED:
+        cache_key = await _build_verification_cache_key(
+            vault_id=vault_id,
+            statement_text=statement.text,
+            vault_updated_at=vault_updated_at,
+        )
+        cached = await _get_cached_verdict(cache_key, statement)
+        if cached:
+            cached.latency_ms = int((time.monotonic() - start) * 1000)
+            cached.verification_path = "cache"
+            cached.cache_hit = True
+            logger.info("Verification cache hit: '%s'", statement.text[:60])
+            return cached
 
     initial_state: VerificationState = {
         "statement_text": statement.text,
@@ -663,6 +838,8 @@ async def verify_statement(
         "search_results": [],
         "search_attempts": 0,
         "is_relevant": False,
+        "aggregate_fallback": False,
+        "verification_path": "crag",
         "verdict": "unverifiable",
         "confidence": 0.0,
         "explanation": "",
@@ -686,14 +863,21 @@ async def verify_statement(
                 relevance_score=float(e.get("relevance_score", 0.0)),
             ))
 
-        return Verdict(
+        latency_ms = int((time.monotonic() - start) * 1000)
+        verdict_obj = Verdict(
             claim_id=statement.id,
             claim_text=statement.text,
             verdict=result.get("verdict", "unverifiable"),
             confidence=result.get("confidence", 0.0),
             explanation=result.get("explanation", ""),
             evidence=evidence_list,
+            verification_path=result.get("verification_path", "crag"),
+            latency_ms=latency_ms,
+            cache_hit=False,
         )
+        if cache_key and _is_cacheable_verdict(verdict_obj):
+            await _store_cached_verdict(cache_key, verdict_obj)
+        return verdict_obj
 
     except asyncio.TimeoutError:
         logger.warning(f"Verification graph timed out for: {statement.text[:50]}")
@@ -703,6 +887,9 @@ async def verify_statement(
             verdict="unverifiable",
             confidence=0.0,
             explanation="Verification timed out.",
+            verification_path="crag",
+            latency_ms=int((time.monotonic() - start) * 1000),
+            cache_hit=False,
         )
     except Exception as e:
         logger.error(f"Verification graph failed for: {statement.text[:50]}: {e}")
@@ -712,6 +899,9 @@ async def verify_statement(
             verdict="unverifiable",
             confidence=0.0,
             explanation=f"Verification failed: {e}",
+            verification_path="crag",
+            latency_ms=int((time.monotonic() - start) * 1000),
+            cache_hit=False,
         )
 
 
@@ -733,6 +923,384 @@ _MONTH_MAP = {
     "november": "11", "nov": "11",
     "december": "12", "dec": "12",
 }
+
+
+def _unverifiable_response(reason: str, verification_path: str | None = None) -> dict:
+    """Return a standardized unverifiable response."""
+    response = {
+        "verdict": "unverifiable",
+        "confidence": 0.0,
+        "explanation": reason,
+        "evidence": [],
+        "aggregate_fallback": False,
+    }
+    if verification_path:
+        response["verification_path"] = verification_path
+    return response
+
+
+def _normalize_statement_for_cache(text: str) -> str:
+    normalized = normalize_numbers(text.lower())
+    normalized = re.sub(r"[^\w\s]", "", normalized)
+    return " ".join(normalized.split())
+
+
+async def _get_vault_cache_version(vault_id: UUID) -> str:
+    async with get_db_session() as db:
+        stmt = select(Vault.updated_at).where(Vault.id == vault_id)
+        result = await db.execute(stmt)
+        updated_at = result.scalar_one_or_none()
+    return updated_at.isoformat() if updated_at else "unknown"
+
+
+async def _build_verification_cache_key(
+    *,
+    vault_id: UUID,
+    statement_text: str,
+    vault_updated_at: str | None,
+) -> str:
+    version = vault_updated_at or await _get_vault_cache_version(vault_id)
+    normalized = _normalize_statement_for_cache(statement_text)
+    digest = hashlib.sha256(normalized.encode()).hexdigest()
+    return f"verdict_cache:{vault_id}:{version}:{digest}"
+
+
+async def _get_cached_verdict(
+    cache_key: str,
+    statement: Statement,
+) -> Verdict | None:
+    try:
+        client = await get_redis_client()
+        raw = await client.get(cache_key)
+        if not raw:
+            return None
+        data = json.loads(raw)
+    except Exception:
+        return None
+
+    evidence_list: list[Evidence] = []
+    for e in data.get("evidence", []) or []:
+        try:
+            evidence_list.append(Evidence(**e))
+        except Exception:
+            continue
+
+    return Verdict(
+        claim_id=statement.id,
+        claim_text=statement.text,
+        verdict=data.get("verdict", "unverifiable"),
+        confidence=float(data.get("confidence", 0.0)),
+        explanation=data.get("explanation", ""),
+        evidence=evidence_list,
+    )
+
+
+async def _store_cached_verdict(
+    cache_key: str,
+    verdict: Verdict,
+) -> None:
+    try:
+        client = await get_redis_client()
+        payload = {
+            "verdict": verdict.verdict,
+            "confidence": verdict.confidence,
+            "explanation": verdict.explanation,
+            "evidence": [
+                e.model_dump() if hasattr(e, "model_dump") else e
+                for e in (verdict.evidence or [])
+            ],
+        }
+        await client.setex(
+            cache_key,
+            SETTINGS.COPILOT.VERIFICATION_CACHE_TTL_S,
+            json.dumps(payload),
+        )
+    except Exception:
+        return
+
+
+def _is_cacheable_verdict(verdict: Verdict) -> bool:
+    explanation = (verdict.explanation or "").lower()
+    if explanation.startswith("verification timed out"):
+        return False
+    if explanation.startswith("verification failed"):
+        return False
+    return True
+
+
+async def _document_type_inventory_verdict(vault_id: UUID) -> dict:
+    """Return a summary of document types available in the vault."""
+    async with get_db_session() as db:
+        stmt = (
+            select(Document.document_type, func.count().label("cnt"))
+            .where(Document.vault_id == vault_id)
+            .where(Document.deleted_at.is_(None))  # type: ignore[union-attr]
+            .where(Document.status == "active")
+            .group_by(Document.document_type)
+            .order_by(Document.document_type)
+        )
+        result = await db.execute(stmt)
+        rows = result.all()
+
+    if not rows:
+        return _unverifiable_response("No documents found in the vault.", "aggregate_fast")
+
+    lines = ["Available document types in this vault:"]
+    for doc_type, cnt in rows:
+        label = doc_type or "unknown"
+        lines.append(f"- {label}: {cnt}")
+
+    return {
+        "verdict": "supported",
+        "confidence": 1.0,
+        "explanation": "\n".join(lines),
+        "evidence": [],
+        "aggregate_fallback": False,
+        "verification_path": "aggregate_fast",
+    }
+
+
+def _base_filters(
+    vault_id: UUID,
+    doc_type: str | None,
+    customer_id: str | None,
+) -> list:
+    filters = [
+        Document.vault_id == vault_id,
+        Document.deleted_at.is_(None),  # type: ignore[union-attr]
+        Document.status == "active",
+    ]
+    if doc_type:
+        filters.append(Document.document_type == doc_type)
+    if customer_id:
+        filters.append(col(Document.customer_id).ilike(customer_id))
+    return filters
+
+
+def _apply_date_filters(
+    filters: list,
+    date_from,
+    date_to,
+) -> list:
+    if date_from:
+        filters.append(Document.order_date >= date_from)
+    if date_to:
+        filters.append(Document.order_date <= date_to)
+    return filters
+
+
+async def _count_documents(filters: list) -> int:
+    async with get_db_session() as db:
+        stmt = select(func.count()).select_from(Document).where(*filters)
+        result = await db.execute(stmt)
+        return result.scalar() or 0
+
+
+async def _aggregate_metadata_gaps(
+    *,
+    vault_id: UUID,
+    doc_type: str | None,
+    date_from,
+    date_to,
+    customer_id: str | None,
+    intent: str,
+) -> list[str]:
+    gaps: list[str] = []
+    base_filters = _base_filters(vault_id, doc_type, customer_id)
+
+    if date_from or date_to:
+        missing_dates = await _count_documents(
+            base_filters + [Document.order_date.is_(None)],  # type: ignore[union-attr]
+        )
+        if missing_dates:
+            gaps.append(f"{missing_dates} document(s) missing order date metadata")
+
+    if intent in ("sum", "average"):
+        total_filters = _apply_date_filters(base_filters[:], date_from, date_to)
+        missing_totals = await _count_documents(
+            total_filters + [Document.total_price.is_(None)],  # type: ignore[union-attr]
+        )
+        if missing_totals:
+            gaps.append(f"{missing_totals} document(s) missing total price metadata")
+
+    return gaps
+
+
+async def _fetch_aggregate_documents(
+    *,
+    vault_id: UUID,
+    doc_type: str | None,
+    date_from,
+    date_to,
+    customer_id: str | None,
+    limit: int,
+) -> tuple[list[Document], int]:
+    filters = _apply_date_filters(
+        _base_filters(vault_id, doc_type, customer_id),
+        date_from,
+        date_to,
+    )
+    async with get_db_session() as db:
+        count_stmt = select(func.count()).select_from(Document).where(*filters)
+        count_result = await db.execute(count_stmt)
+        total_count = count_result.scalar() or 0
+
+        docs: list[Document] = []
+        if limit > 0:
+            doc_stmt = (
+                select(Document)
+                .where(*filters)
+                .order_by(Document.order_date, Document.entity_id, Document.original_filename)
+                .limit(limit)
+            )
+            doc_result = await db.execute(doc_stmt)
+            docs = doc_result.scalars().all()
+
+    return docs, total_count
+
+
+async def _sum_total_price(
+    *,
+    vault_id: UUID,
+    doc_type: str | None,
+    date_from,
+    date_to,
+    customer_id: str | None,
+) -> float | None:
+    filters = _apply_date_filters(
+        _base_filters(vault_id, doc_type, customer_id),
+        date_from,
+        date_to,
+    )
+    async with get_db_session() as db:
+        stmt = select(func.sum(Document.total_price)).where(*filters)
+        result = await db.execute(stmt)
+        total = result.scalar()
+    return float(total) if total is not None else None
+
+
+def _format_metadata_gap_explanation(
+    gaps: list[str],
+    doc_type: str | None,
+    date_from,
+    date_to,
+    customer_id: str | None,
+) -> str:
+    filter_desc = build_filter_description(doc_type, date_from, date_to, customer_id)
+    lines = [
+        f"Cannot verify an exact result for: {filter_desc}.",
+        "Missing metadata:",
+    ]
+    lines.extend(f"- {gap}" for gap in gaps)
+    lines.append("Re-ingest documents or run metadata backfill to fill the gaps.")
+    return "\n".join(lines)
+
+
+def _format_doc_line(doc: Document) -> str:
+    line = f"{doc.original_filename}"
+    details: list[str] = []
+    if doc.order_date:
+        details.append(f"Date: {doc.order_date}")
+    if doc.customer_id:
+        details.append(f"Customer: {doc.customer_id}")
+    if doc.total_price is not None:
+        details.append(f"Total: ${doc.total_price:,.2f}")
+    if doc.entity_id:
+        details.append(f"ID: {doc.entity_id}")
+    if details:
+        line += " — " + ", ".join(details)
+    return line
+
+
+def _format_aggregate_explanation(
+    *,
+    filter_desc: str,
+    total_count: int,
+    docs: list[Document],
+    value: float | None,
+    value_label: str | None,
+) -> str:
+    lines = [f"Found {total_count} documents matching: {filter_desc}"]
+    if value_label and value is not None:
+        lines.append(f"{value_label}: ${value:,.2f}")
+    lines.append(f"Count: {total_count}")
+
+    if docs:
+        lines.append("")
+        lines.append("Documents:")
+        list_max = SETTINGS.COPILOT.AGGREGATE_LIST_MAX_DOCS
+        for i, doc in enumerate(docs[:list_max], 1):
+            lines.append(f"{i}. {_format_doc_line(doc)}")
+        if total_count > list_max:
+            lines.append(f"... (showing first {list_max} of {total_count})")
+
+    return "\n".join(lines)
+
+
+def _format_doc_metadata_quote(doc: Document) -> str:
+    lines = [f"Document: {doc.original_filename}"]
+    if doc.document_type:
+        lines.append(f"Type: {doc.document_type}")
+    if doc.entity_id:
+        lines.append(f"ID: {doc.entity_id}")
+    if doc.order_date:
+        lines.append(f"Order Date: {doc.order_date}")
+    if doc.customer_id:
+        lines.append(f"Customer ID: {doc.customer_id}")
+    if doc.total_price is not None:
+        lines.append(f"Total Price: ${doc.total_price:,.2f}")
+    return "\n".join(lines)
+
+
+async def _build_aggregate_evidence(
+    *,
+    vault_id: UUID,
+    docs: list[Document],
+    max_docs: int,
+) -> list[dict]:
+    if not docs or max_docs <= 0:
+        return []
+
+    doc_subset = docs[:max_docs]
+    doc_ids = [d.id for d in doc_subset]
+
+    chunk_map: dict[UUID, Chunk] = {}
+    async with get_db_session() as db:
+        stmt = (
+            select(Chunk)
+            .where(Chunk.doc_id.in_(doc_ids))
+            .where(Chunk.vault_id == vault_id)
+            .where(Chunk.is_deleted == False)  # noqa: E712
+            .where(Chunk.chunk_type == "metadata")
+            .order_by(Chunk.doc_id, Chunk.chunk_index)
+        )
+        result = await db.execute(stmt)
+        chunks = result.scalars().all()
+
+    for chunk in chunks:
+        if chunk.doc_id not in chunk_map:
+            chunk_map[chunk.doc_id] = chunk
+
+    evidence: list[dict] = []
+    for doc in doc_subset:
+        chunk = chunk_map.get(doc.id)
+        if chunk:
+            quote = chunk.content_with_header or chunk.content
+            section = chunk.section_heading
+            page = chunk.page_number
+        else:
+            quote = _format_doc_metadata_quote(doc)
+            section = None
+            page = None
+        evidence.append({
+            "doc_title": doc.original_filename,
+            "section": section,
+            "page": page,
+            "quote": quote,
+            "relevance_score": 1.0,
+        })
+
+    return evidence
 
 
 async def _sql_metadata_filter(

@@ -16,6 +16,7 @@ from sqlmodel import select, func
 
 from app.db import get_db, get_db_session
 from app.db.models import User
+from app.db.models.vault import Vault
 from app.db.models.transcription_session import TranscriptionSession
 from app.core.auth.deps import get_current_user, require_vault_member, authenticate_websocket
 from app.core.config import get_settings
@@ -125,9 +126,21 @@ async def transcribe_audio(
         ]
 
         if statements:
+            vault_updated_at: str | None = None
+            if SETTINGS.COPILOT.VERIFICATION_CACHE_ENABLED:
+                result = await db.execute(
+                    select(Vault.updated_at).where(Vault.id == vault_id)
+                )
+                updated_at = result.scalar_one_or_none()
+                vault_updated_at = updated_at.isoformat() if updated_at else None
+
             raw_verdicts = await asyncio.gather(*[
                 asyncio.wait_for(
-                    verify_statement(s, vault_id),
+                    verify_statement(
+                        s,
+                        vault_id,
+                        vault_updated_at=vault_updated_at,
+                    ),
                     timeout=SETTINGS.API_TIMEOUT_S,
                 )
                 for s in statements
@@ -142,6 +155,9 @@ async def transcribe_audio(
                         claim_id=v.claim_id, claim_text=v.claim_text,
                         verdict=v.verdict, confidence=v.confidence,
                         explanation=v.explanation, evidence=v.evidence,
+                        verification_path=v.verification_path,
+                        latency_ms=v.latency_ms,
+                        cache_hit=v.cache_hit,
                     )
                 )
 

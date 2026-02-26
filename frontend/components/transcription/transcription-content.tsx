@@ -45,6 +45,23 @@ function formatTimestamp(secs: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+function formatLatency(ms?: number | null): string {
+  if (ms === null || ms === undefined) return "";
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
+}
+
+function verificationLabel(path?: string | null, cacheHit?: boolean): string | null {
+  if (cacheHit) return "cache";
+  if (!path) return null;
+  const labels: Record<string, string> = {
+    aggregate_fast: "fast",
+    aggregate_fallback: "fallback",
+    crag: "llm",
+  };
+  return labels[path] ?? path;
+}
+
 const SPEAKER_COLORS = [
   "text-blue-600 dark:text-blue-400",
   "text-emerald-600 dark:text-emerald-400",
@@ -114,6 +131,8 @@ function SegmentList({ segments }: { segments: LiveSegment[] }) {
 
 function ClaimCard({ claim }: { claim: LiveClaim }) {
   const [sourcesOpen, setSourcesOpen] = useState(false);
+  const latencyText = formatLatency(claim.latency_ms);
+  const pathLabel = verificationLabel(claim.verification_path, claim.cache_hit);
 
   return (
     <div className="overflow-hidden rounded-lg border border-neutral-200 px-3 py-2.5 dark:border-neutral-700">
@@ -134,6 +153,13 @@ function ClaimCard({ claim }: { claim: LiveClaim }) {
               Speaker {claim.speaker + 1}
             </span>
           </div>
+          {(latencyText || pathLabel) && (
+            <div className="mt-1 text-[10px] text-neutral-400">
+              {pathLabel}
+              {pathLabel && latencyText ? " • " : ""}
+              {latencyText}
+            </div>
+          )}
           {claim.explanation && (
             <p className="mt-1.5 text-xs text-neutral-500 dark:text-neutral-400">
               {claim.explanation}

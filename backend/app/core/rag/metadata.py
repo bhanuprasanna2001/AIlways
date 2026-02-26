@@ -225,6 +225,23 @@ def build_metadata_chunk(
 
     parts: list[str] = []
 
+    # Structured metadata (deterministic, used for aggregate evidence)
+    structured: list[str] = []
+    if meta.document_type:
+        structured.append(f"- Document Type: {meta.document_type}")
+    if meta.entity_id:
+        structured.append(f"- Entity ID: {meta.entity_id}")
+    if meta.order_date:
+        structured.append(f"- Order Date: {meta.order_date.isoformat()}")
+    if meta.customer_id:
+        structured.append(f"- Customer ID: {meta.customer_id}")
+    if meta.total_price is not None:
+        structured.append(f"- Total Price: {meta.total_price}")
+
+    if structured:
+        parts.append("Structured Metadata:")
+        parts.extend(structured)
+
     # Summary
     if meta.summary:
         parts.append(f"Summary: {meta.summary}")
