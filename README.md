@@ -43,6 +43,19 @@ Enterprise teams make critical decisions referencing documents they can't search
 
 ---
 
+## Most Important Learning
+
+1. Async is hard, but worth it for real-time features. The ingestion pipeline performance was achieved solely through async workers and Redpanda.
+2. RAG is not just retrieval, but there are many filtering stages - Time based, Text search, Aggregations, and many more.
+3. With just rag we can achieve good performance, we need proper metadata and chunking strategies to achieve good quality results.
+4. I initially thought the transcription would be the most complex part, but building the RAG pipeline and optimizing it for performance and accuracy ended up being the most challenging and rewarding aspect of the project.
+
+There are many more learnings. Do watch the video for seeing the demo of the project. Looking forward to your feedback and suggestions for improvement. I have many ideas for next steps and features to add, so stay tuned!
+
+**If you want to contribute, feel free to open an issue or pull request. ;)**
+
+---
+
 ## ✦ What It Does
 
 ### 🎙️ Live Transcription + Real-Time Fact-Checking
