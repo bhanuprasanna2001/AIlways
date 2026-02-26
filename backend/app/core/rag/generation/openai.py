@@ -55,6 +55,14 @@ _USER_TEMPLATE = """CONTEXT:
 
 QUESTION: {query}"""
 
+_USER_TEMPLATE_WITH_HISTORY = """CONVERSATION HISTORY (for reference — answer the CURRENT QUESTION):
+{history}
+
+CONTEXT:
+{context}
+
+CURRENT QUESTION: {query}"""
+
 _INSUFFICIENT = AnswerResult(
     answer="Insufficient evidence in vault.",
     confidence=0.0,
@@ -83,12 +91,19 @@ class OpenAIGenerator:
         )
         logger.info(f"Initialised generator: model={model}")
 
-    async def generate(self, query: str, results: list[SearchResult]) -> AnswerResult:
+    async def generate(
+        self,
+        query: str,
+        results: list[SearchResult],
+        history: list[dict[str, str]] | None = None,
+    ) -> AnswerResult:
         """Generate a grounded answer from retrieved context.
 
         Args:
             query: The user's question.
             results: Search results from the retrieval module.
+            history: Optional conversation history for multi-turn context.
+                Each dict has ``role`` and ``content`` keys.
 
         Returns:
             AnswerResult: Structured answer with citations and confidence.
@@ -99,7 +114,7 @@ class OpenAIGenerator:
             return _INSUFFICIENT
 
         context = build_retrieval_context(results)
-        user_message = _USER_TEMPLATE.format(context=context, query=query)
+        user_message = _build_user_message(query, context, history)
 
         try:
             response = await asyncio.wait_for(
@@ -117,7 +132,12 @@ class OpenAIGenerator:
             logger.error(f"Generation failed: {e}")
             return _INSUFFICIENT
 
-    async def stream(self, query: str, results: list[SearchResult]) -> AsyncIterator[str]:
+    async def stream(
+        self,
+        query: str,
+        results: list[SearchResult],
+        history: list[dict[str, str]] | None = None,
+    ) -> AsyncIterator[str]:
         """Stream raw LLM response tokens.
 
         Yields each content delta as a string. The caller accumulates
@@ -131,7 +151,7 @@ class OpenAIGenerator:
             return
 
         context = build_retrieval_context(results)
-        user_message = _USER_TEMPLATE.format(context=context, query=query)
+        user_message = _build_user_message(query, context, history)
 
         try:
             async for chunk in self._llm.astream([
@@ -176,3 +196,33 @@ def parse_response(raw: str) -> AnswerResult:
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         logger.warning(f"Failed to parse LLM response: {e}")
         return _INSUFFICIENT
+
+
+def _build_user_message(
+    query: str,
+    context: str,
+    history: list[dict[str, str]] | None = None,
+) -> str:
+    """Build the user message, optionally including conversation history.
+
+    When history is present, uses a template that includes the
+    conversation context so the LLM can maintain continuity.
+    """
+    if history:
+        lines: list[str] = []
+        for msg in history[-SETTINGS.QUERY_HISTORY_MAX_TURNS * 2:]:
+            role = msg.get("role", "user").capitalize()
+            content = msg.get("content", "").strip()
+            if content:
+                # Truncate long assistant messages to save tokens
+                if role == "Assistant" and len(content) > 500:
+                    content = content[:500] + "..."
+                lines.append(f"{role}: {content}")
+        history_text = "\n".join(lines)
+        if history_text.strip():
+            return _USER_TEMPLATE_WITH_HISTORY.format(
+                history=history_text,
+                context=context,
+                query=query,
+            )
+    return _USER_TEMPLATE.format(context=context, query=query)

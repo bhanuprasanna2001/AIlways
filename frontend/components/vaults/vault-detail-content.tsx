@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import useSWR from "swr";
 import ReactMarkdown from "react-markdown";
@@ -12,6 +12,7 @@ import {
   AlertCircle,
   Eye,
   X,
+  Search,
 } from "lucide-react";
 import { apiFetch, ApiError, fetcher } from "@/lib/api";
 import { formatFileSize, formatRelativeTime } from "@/lib/utils";
@@ -22,6 +23,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Modal } from "@/components/ui/modal";
 import { Badge } from "@/components/ui/badge";
+import { Pagination } from "@/components/ui/pagination";
 import { DocumentStatusBadge } from "./document-status-badge";
 import { DocumentUploadZone } from "./document-upload-zone";
 
@@ -40,18 +42,52 @@ export default function VaultDetailContent({ vaultId }: Props) {
     mutate: mutateVault,
   } = useSWR<Vault>(`/api/vaults/${vaultId}`, fetcher);
 
-  // ---- Documents with conditional polling ----
+  // ---- Documents with server-side pagination + search ----
+  const DOCS_PER_PAGE = 20;
+  const [docSearch, setDocSearch] = useState("");
+  const [docPage, setDocPage] = useState(1);
   const [pollInterval, setPollInterval] = useState(0);
 
+  // Debounce search to avoid hammering the server on every keystroke
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedSearch(docSearch), 300);
+    return () => clearTimeout(id);
+  }, [docSearch]);
+
+  // Build SWR key with server-side pagination & search params
+  const docsKey = useMemo(() => {
+    const params = new URLSearchParams({
+      skip: String((docPage - 1) * DOCS_PER_PAGE),
+      limit: String(DOCS_PER_PAGE),
+    });
+    if (debouncedSearch) params.set("search", debouncedSearch);
+    return `/api/vaults/${vaultId}/documents?${params}`;
+  }, [vaultId, docPage, debouncedSearch]);
+
+  // Custom fetcher that returns both the document array and total count
+  const docsFetcher = useCallback(async (url: string) => {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("Failed to fetch documents");
+    const docs: Document[] = await res.json();
+    const total = parseInt(res.headers.get("X-Total-Count") ?? "0", 10);
+    return { docs, total };
+  }, []);
+
   const {
-    data: documents,
+    data: docsData,
     isLoading: docsLoading,
+    isValidating: docsValidating,
     mutate: mutateDocs,
-  } = useSWR<Document[]>(
-    `/api/vaults/${vaultId}/documents`,
-    fetcher,
-    { refreshInterval: pollInterval },
+  } = useSWR<{ docs: Document[]; total: number }>(
+    docsKey,
+    docsFetcher,
+    { refreshInterval: pollInterval, keepPreviousData: true },
   );
+
+  const documents = docsData?.docs;
+  const docTotal = docsData?.total ?? 0;
+  const docTotalPages = Math.max(1, Math.ceil(docTotal / DOCS_PER_PAGE));
 
   // Enable polling when documents are processing
   useEffect(() => {
@@ -60,6 +96,18 @@ export default function VaultDetailContent({ vaultId }: Props) {
     );
     setPollInterval(hasPending ? DOCUMENT_POLL_INTERVAL_MS : 0);
   }, [documents]);
+
+  // Reset to page 1 when search changes
+  useEffect(() => {
+    setDocPage(1);
+  }, [debouncedSearch]);
+
+  // If a deletion empties the current page, step back
+  useEffect(() => {
+    if (docsData && docsData.docs.length === 0 && docPage > 1) {
+      setDocPage((p) => p - 1);
+    }
+  }, [docsData, docPage]);
 
   // ---- Delete document ----
   const [deleteDoc, setDeleteDoc] = useState<Document | null>(null);
@@ -141,7 +189,10 @@ export default function VaultDetailContent({ vaultId }: Props) {
   }, [previewDoc]);
 
   // ---- Loading / Error ----
-  if (vaultLoading || docsLoading) {
+  // Full-page spinner ONLY on very first mount (no data at all).
+  // During pagination / search revalidation keepPreviousData keeps
+  // stale data visible so the tree is never unmounted.
+  if (vaultLoading || (docsLoading && !docsData)) {
     return (
       <div className="flex h-64 items-center justify-center">
         <Spinner className="h-6 w-6" />
@@ -211,7 +262,7 @@ export default function VaultDetailContent({ vaultId }: Props) {
       )}
 
       {/* Document table */}
-      {!documents || documents.length === 0 ? (
+      {docTotal === 0 && !debouncedSearch ? (
         <EmptyState
           icon={<FileText className="h-10 w-10" />}
           title="No documents yet"
@@ -222,11 +273,38 @@ export default function VaultDetailContent({ vaultId }: Props) {
           }
         />
       ) : (
+        <div>
         <Card>
           <CardHeader>
-            <h3 className="text-sm font-semibold text-foreground">Documents</h3>
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-foreground">
+                Documents{" "}
+                <span className="font-normal text-neutral-400">
+                  ({docTotal})
+                </span>
+                {docsValidating && (
+                  <Spinner className="ml-2 inline-block h-3 w-3 align-middle" />
+                )}
+              </h3>
+              <div className="relative w-56">
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-400" />
+                <input
+                  type="text"
+                  value={docSearch}
+                  onChange={(e) => setDocSearch(e.target.value)}
+                  placeholder="Search documents…"
+                  aria-label="Search documents"
+                  className="h-8 w-full rounded-lg border border-neutral-200 bg-white pl-9 pr-3 text-sm text-foreground outline-none placeholder:text-neutral-400 focus:border-foreground dark:border-neutral-700 dark:bg-neutral-900 dark:placeholder:text-neutral-500"
+                />
+              </div>
+            </div>
           </CardHeader>
           <CardContent className="p-0">
+            {docTotal === 0 ? (
+              <p className="px-5 py-8 text-center text-sm text-neutral-500 dark:text-neutral-400">
+                No documents match &ldquo;{docSearch}&rdquo;
+              </p>
+            ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -254,7 +332,7 @@ export default function VaultDetailContent({ vaultId }: Props) {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
-                  {documents.map((doc) => (
+                  {(documents ?? []).map((doc) => (
                     <tr
                       key={doc.id}
                       className="transition-colors hover:bg-neutral-50 dark:hover:bg-neutral-800/20"
@@ -321,8 +399,16 @@ export default function VaultDetailContent({ vaultId }: Props) {
                 </tbody>
               </table>
             </div>
+            )}
+            <Pagination
+              page={docPage}
+              totalPages={docTotalPages}
+              onPageChange={setDocPage}
+              className="pb-4"
+            />
           </CardContent>
         </Card>
+        </div>
       )}
 
       {/* Delete document confirmation */}

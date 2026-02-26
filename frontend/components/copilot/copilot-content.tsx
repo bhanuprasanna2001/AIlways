@@ -12,6 +12,8 @@ import {
   MessageSquare,
   Plus,
   FileText,
+  AlertCircle,
+  FolderLock,
 } from "lucide-react";
 import { apiFetch, fetcher } from "@/lib/api";
 import { cn, generateId, truncate } from "@/lib/utils";
@@ -39,13 +41,13 @@ function CitationCard({ citation, index }: { citation: Citation; index: number }
   const isLong = citation.quote.length > 200;
 
   return (
-    <div className="rounded-lg border border-neutral-200 transition-colors hover:border-neutral-300 dark:border-neutral-700 dark:hover:border-neutral-600">
+    <div className="overflow-hidden rounded-lg border border-neutral-200 transition-colors hover:border-neutral-300 dark:border-neutral-700 dark:hover:border-neutral-600">
       <button
         onClick={() => setExpanded(!expanded)}
         className="flex w-full items-center gap-2 px-3 py-2 text-left"
       >
         <FileText className="h-3.5 w-3.5 shrink-0 text-neutral-400" />
-        <span className="flex-1 truncate text-xs font-medium text-foreground">
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">
           {citation.doc_title}
           {citation.section && (
             <span className="text-neutral-400"> · {citation.section}</span>
@@ -67,11 +69,11 @@ function CitationCard({ citation, index }: { citation: Citation; index: number }
       </button>
       <div
         className={cn(
-          "border-t border-neutral-100 px-3 py-2 dark:border-neutral-800",
-          isLong && !expanded && "max-h-24 overflow-hidden",
+          "overflow-hidden border-t border-neutral-100 px-3 py-2 dark:border-neutral-800",
+          isLong && !expanded && "max-h-24",
         )}
       >
-        <div className="prose prose-xs max-w-none text-xs text-neutral-600 dark:prose-invert dark:text-neutral-400 prose-p:my-1 prose-table:my-1 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-table:text-xs prose-table:border prose-th:border prose-td:border prose-th:bg-neutral-50 dark:prose-th:bg-neutral-800/50">
+        <div className="prose prose-xs max-w-none overflow-x-auto text-xs text-neutral-600 dark:prose-invert dark:text-neutral-400 prose-p:my-1 prose-table:my-1 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-table:text-xs prose-table:border prose-th:border prose-td:border prose-th:bg-neutral-50 dark:prose-th:bg-neutral-800/50">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>
             {citation.quote}
           </ReactMarkdown>
@@ -236,7 +238,17 @@ export default function CopilotContent() {
 
     // 2. URL has a conversation param → attempt to load it.
     if (conversationParam) {
-      if (lastLoadedConvRef.current === conversationParam) return; // already loaded/attempted
+      if (lastLoadedConvRef.current === conversationParam) {
+        // Conversation already loaded — but vault might not have been resolved
+        // if vaults weren't available at load time. Re-check now.
+        if (!selectedVaultId && vaults?.length) {
+          const conv = getConversation(conversationParam);
+          if (conv && vaults.some((v) => v.id === conv.vault_id)) {
+            setSelectedVaultId(conv.vault_id);
+          }
+        }
+        return;
+      }
 
       const conv = getConversation(conversationParam);
       if (conv) {
@@ -268,8 +280,10 @@ export default function CopilotContent() {
       // Fall through to default vault selection.
     }
 
-    // 4. Default vault selection when nothing is loaded
-    if (vaults?.length && !selectedVaultId) {
+    // 4. Default vault selection — only when not viewing a conversation.
+    //    When viewing a conversation whose vault is deleted, we leave
+    //    selectedVaultId empty to signal read-only mode.
+    if (vaults?.length && !selectedVaultId && !conversationParam) {
       setSelectedVaultId(vaults[0].id);
     }
   }, [isHydrated, conversationParam, getConversation, vaults, selectedVaultId, router]);
@@ -345,11 +359,19 @@ export default function CopilotContent() {
     abortRef.current = new AbortController();
 
     try {
+      // Build conversation history for the backend query rewriter.
+      // Send the last 10 turns (20 messages) so the rewriter can
+      // resolve pronouns and coreferences like "it", "that invoice", etc.
+      const historyForBackend = newMessages
+        .slice(-20)
+        .filter((m) => m.content.trim())
+        .map((m) => ({ role: m.role, content: m.content }));
+
       const response = await apiFetch<QueryResponse>(
         `/api/vaults/${selectedVaultId}/query`,
         {
           method: "POST",
-          body: { query: trimmed, top_k: 5 },
+          body: { query: trimmed, top_k: 5, history: historyForBackend },
           signal: abortRef.current.signal,
         },
       );
@@ -444,8 +466,21 @@ export default function CopilotContent() {
 
   const selectedVault = vaults?.find((v) => v.id === selectedVaultId);
 
-  // ---- No vaults ----
-  if (vaults && vaults.length === 0) {
+  // ---- Derived state: read-only mode ----
+  // A conversation becomes read-only when its vault no longer exists.
+  // The user can view the full history but cannot send new messages.
+  const loadedConv = activeConvId ? getConversation(activeConvId) : null;
+  const isReadOnly =
+    messages.length > 0 && vaults !== undefined && !selectedVaultId;
+  const readOnlyVaultName = loadedConv?.vault_name ?? "Unknown vault";
+
+  // ---- No vaults — only when NOT viewing a conversation ----
+  if (
+    vaults &&
+    vaults.length === 0 &&
+    !conversationParam &&
+    messages.length === 0
+  ) {
     return (
       <EmptyState
         icon={<MessageSquare className="h-10 w-10" />}
@@ -468,23 +503,37 @@ export default function CopilotContent() {
       {/* Top bar */}
       <div className="flex items-center justify-between pb-4">
         <div className="flex items-center gap-3">
-          <select
-            value={selectedVaultId}
-            onChange={(e) => handleVaultChange(e.target.value)}
-            aria-label="Select vault"
-            className="h-9 rounded-lg border border-neutral-200 bg-white px-3 pr-8 text-sm text-foreground outline-none dark:border-neutral-700 dark:bg-neutral-900"
-          >
-            {vaults?.map((v) => (
-              <option key={v.id} value={v.id}>
-                {v.name}
-              </option>
-            ))}
-          </select>
-          {selectedVault?.document_count === 0 && (
-            <Badge variant="warning">No documents</Badge>
+          {isReadOnly ? (
+            /* Read-only: show the original vault name with a badge */
+            <>
+              <div className="flex h-9 items-center gap-2 rounded-lg border border-neutral-200 bg-white px-3 text-sm text-neutral-500 dark:border-neutral-700 dark:bg-neutral-900">
+                <FolderLock className="h-3.5 w-3.5" />
+                {readOnlyVaultName}
+              </div>
+              <Badge variant="warning">Vault deleted</Badge>
+            </>
+          ) : (
+            /* Normal: interactive vault selector */
+            <>
+              <select
+                value={selectedVaultId}
+                onChange={(e) => handleVaultChange(e.target.value)}
+                aria-label="Select vault"
+                className="h-9 rounded-lg border border-neutral-200 bg-white px-3 pr-8 text-sm text-foreground outline-none dark:border-neutral-700 dark:bg-neutral-900"
+              >
+                {vaults?.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.name}
+                  </option>
+                ))}
+              </select>
+              {selectedVault?.document_count === 0 && (
+                <Badge variant="warning">No documents</Badge>
+              )}
+            </>
           )}
         </div>
-        {messages.length > 0 && (
+        {(messages.length > 0 || isReadOnly) && (
           <button
             onClick={handleNewConversation}
             className="inline-flex items-center gap-1.5 text-sm font-medium text-neutral-500 hover:text-foreground dark:text-neutral-400"
@@ -494,6 +543,17 @@ export default function CopilotContent() {
           </button>
         )}
       </div>
+
+      {/* Read-only info banner */}
+      {isReadOnly && (
+        <div className="mb-3 flex items-center gap-2 rounded-lg bg-amber-50 px-4 py-2.5 text-sm text-amber-700 dark:bg-amber-950/30 dark:text-amber-400">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          <span>
+            This conversation&apos;s vault is no longer available. You can
+            review the history but cannot send new messages.
+          </span>
+        </div>
+      )}
 
       {/* Messages area */}
       <div className="flex-1 overflow-y-auto pr-4">
@@ -547,11 +607,13 @@ export default function CopilotContent() {
             onKeyDown={handleKeyDown}
             aria-label="Message"
             placeholder={
-              selectedVault?.document_count === 0
-                ? "Upload documents to this vault first…"
-                : "Ask a question about your documents…"
+              isReadOnly
+                ? "Vault unavailable — start a new chat to continue"
+                : selectedVault?.document_count === 0
+                  ? "Upload documents to this vault first…"
+                  : "Ask a question about your documents…"
             }
-            disabled={selectedVault?.document_count === 0}
+            disabled={isReadOnly || selectedVault?.document_count === 0}
             rows={1}
             maxLength={MAX_QUERY_LENGTH}
             className="flex-1 resize-none rounded-lg border border-neutral-200 bg-white px-4 py-2.5 text-sm text-foreground outline-none transition-colors placeholder:text-neutral-400 focus:border-foreground disabled:cursor-not-allowed disabled:opacity-50 dark:border-neutral-700 dark:bg-neutral-900 dark:placeholder:text-neutral-500"
@@ -560,6 +622,7 @@ export default function CopilotContent() {
           <button
             onClick={handleSend}
             disabled={
+              isReadOnly ||
               !query.trim() ||
               isQuerying ||
               !selectedVaultId ||

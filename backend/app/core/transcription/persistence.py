@@ -16,7 +16,7 @@ from uuid import UUID
 
 from sqlmodel import select, func
 
-from app.core.claims.base import Claim
+from app.core.copilot.base import Statement
 from app.core.transcription.base import TranscriptSegment
 from app.core.utils import utcnow
 from app.db import get_db_session
@@ -174,8 +174,8 @@ class SessionPersistence:
 
     # Claim persistence -------------------------------------------------------
 
-    async def persist_claim(self, claim: Claim) -> UUID:
-        """Insert a detected claim with ``pending`` verdict. Returns the DB row ID."""
+    async def persist_claim(self, claim: Statement) -> UUID:
+        """Insert a detected statement with ``pending`` verdict. Returns the DB row ID."""
         row = TranscriptionClaim(
             session_id=self.session_id,
             text=claim.text,

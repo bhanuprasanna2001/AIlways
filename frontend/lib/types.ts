@@ -126,6 +126,9 @@ export type TranscriptionClaim = {
   confidence: number;
   explanation: string | null;
   evidence: Citation[];
+  verification_path?: string | null;
+  latency_ms?: number | null;
+  cache_hit?: boolean;
 };
 
 export type TranscriptionSessionDetail = TranscriptionSession & {

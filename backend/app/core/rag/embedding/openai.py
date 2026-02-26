@@ -49,15 +49,19 @@ class OpenAIEmbedder:
         self._cache_ttl = int(SETTINGS.EMBEDDING_CACHE_TTL_S)
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """Embed a batch of texts and return one vector per input."""
-        try:
-            return await asyncio.wait_for(
-                self._client.aembed_documents(texts),
-                timeout=SETTINGS.EMBEDDING_TIMEOUT_S,
-            )
-        except asyncio.TimeoutError:
-            logger.error(f"Embedding timed out for {len(texts)} texts")
-            raise
+        """Embed a batch of texts with exponential-backoff retries.
+
+        Retries on timeout and transient API errors to survive the
+        intermittent failures that killed the old one-shot approach.
+        """
+        if not texts:
+            return []
+        return await self._embed_with_retries(
+            self._client.aembed_documents,
+            texts,
+            label=f"{len(texts)} texts",
+            timeout=SETTINGS.EMBEDDING_TIMEOUT_S,
+        )
 
     async def embed_query(self, text: str) -> list[float]:
         """Embed a single query string (cached in Redis with TTL)."""
@@ -73,14 +77,12 @@ class OpenAIEmbedder:
         except Exception:
             pass
 
-        try:
-            result = await asyncio.wait_for(
-                self._client.aembed_query(text),
-                timeout=SETTINGS.API_TIMEOUT_S,
-            )
-        except asyncio.TimeoutError:
-            logger.error("Query embedding timed out")
-            raise
+        result = await self._embed_with_retries(
+            self._client.aembed_query,
+            text,
+            label="query",
+            timeout=SETTINGS.API_TIMEOUT_S,
+        )
 
         # Store in Redis — fire-and-forget, non-blocking on failure
         try:
@@ -91,3 +93,45 @@ class OpenAIEmbedder:
             pass
 
         return result
+
+    # ------------------------------------------------------------------
+    # Retry helper
+    # ------------------------------------------------------------------
+
+    async def _embed_with_retries(self, fn, payload, *, label: str, timeout: float):
+        """Call *fn(payload)* with exponential-backoff retries.
+
+        On timeout or transient error, retries up to
+        ``EMBEDDING_MAX_RETRIES`` times with ``2^attempt`` delay.
+        On final failure, raises a descriptive ``TimeoutError``
+        (for timeouts) or re-raises the original exception.
+        """
+        max_retries = max(SETTINGS.EMBEDDING_MAX_RETRIES, 1)
+        base_delay = SETTINGS.EMBEDDING_RETRY_BASE_DELAY_S
+
+        for attempt in range(max_retries):
+            try:
+                return await asyncio.wait_for(fn(payload), timeout=timeout)
+            except asyncio.TimeoutError:
+                if attempt == max_retries - 1:
+                    raise TimeoutError(
+                        f"Embedding timed out after {max_retries} attempts "
+                        f"({timeout:.0f}s each) for {label}"
+                    )
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    "Embedding timeout for %s (attempt %d/%d), retrying in %.1fs",
+                    label, attempt + 1, max_retries, delay,
+                )
+                await asyncio.sleep(delay)
+            except Exception as exc:
+                if attempt == max_retries - 1:
+                    raise
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    "Embedding error for %s (attempt %d/%d): %s — retrying in %.1fs",
+                    label, attempt + 1, max_retries, exc, delay,
+                )
+                await asyncio.sleep(delay)
+
+        raise RuntimeError("Retry loop exhausted without result")

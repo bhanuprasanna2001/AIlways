@@ -1,11 +1,11 @@
-"""Transcript buffer — sliding context window for claim detection.
+"""Transcript buffer — sliding context window for statement extraction.
 
 Key design:
 1. Context window of last N checked segments for entity reference resolution.
 2. Timer-only triggering via ``should_trigger_claims()`` — no reactive
    ``speech_final`` trigger, ensuring related segments split across
    DeepGram messages are always batched together.
-3. Duplicate claim prevention via word-overlap fingerprinting.
+3. Duplicate statement prevention via word-overlap fingerprinting.
 4. Memory bounded at ``CLAIM_MAX_BUFFER_SEGMENTS``.
 """
 
@@ -13,16 +13,22 @@ from __future__ import annotations
 
 import re
 import time
+from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from app.core.transcription.base import TranscriptSegment
-from app.core.claims.base import Claim
 from app.core.config import get_settings
 from app.core.logger import setup_logger
 
 logger = setup_logger(__name__)
 
 SETTINGS = get_settings()
+
+
+@runtime_checkable
+class _HasText(Protocol):
+    """Any object with a ``text`` attribute — both Claim and Statement satisfy."""
+    text: str
 
 
 class TranscriptBuffer:
@@ -104,24 +110,38 @@ class TranscriptBuffer:
 
     # Deduplication -----------------------------------------------------------
 
-    def deduplicate_claims(self, claims: list[Claim]) -> list[Claim]:
-        """Filter out claims that are semantically duplicate of already-seen ones."""
-        new_claims: list[Claim] = []
+    def deduplicate_claims(self, claims: list) -> list:
+        """Filter out statements/claims that are semantically duplicate of already-seen ones.
+
+        Accepts any list of objects with a ``.text`` attribute (both
+        ``Statement`` and ``Claim`` models satisfy this).
+        """
+        new_claims: list = []
         for claim in claims:
             fp = claim_fingerprint(claim.text)
             if self._is_duplicate(fp):
-                logger.debug(f"Duplicate claim skipped: {claim.text[:50]}")
+                logger.debug(f"Duplicate skipped: {claim.text[:50]}")
                 continue
             self._seen_claim_fingerprints.add(fp)
             new_claims.append(claim)
         return new_claims
 
     def _is_duplicate(self, fingerprint: str) -> bool:
-        fp_words = set(fingerprint.split())
+        """Check if a fingerprint is a semantic duplicate of a seen one.
+
+        Uses Jaccard word-overlap with discriminator boosting: tokens
+        that carry high semantic weight (months, numbers, entity IDs) are
+        repeated in the word bag so changes in those tokens produce a much
+        larger Jaccard divergence.  Without boosting, statements like
+        'all invoices from july 2016' vs 'all invoices from august 2016'
+        share about 80% words; with 3x boosting on the month token,
+        overlap drops to about 50%.
+        """
+        fp_words = _boosted_word_bag(fingerprint)
         if not fp_words:
             return False
         for seen_fp in self._seen_claim_fingerprints:
-            seen_words = set(seen_fp.split())
+            seen_words = _boosted_word_bag(seen_fp)
             if not seen_words:
                 continue
             intersection = len(fp_words & seen_words)
@@ -133,28 +153,58 @@ class TranscriptBuffer:
     # Entity tracking ---------------------------------------------------------
 
     def update_entities(self, text: str) -> None:
-        """Extract key entities from text and update the running summary.
+        """Extract key entities from text and merge into the running summary.
 
         Uses simple regex patterns to avoid an LLM call while providing
-        enough context for claim resolution.
+        enough context for statement resolution.
+
+        IMPORTANT: Merges new entities with existing ones instead of
+        overwriting, so previously mentioned entities are never lost.
+
+        Universal: works for invoices, orders, contracts, serial numbers,
+        case IDs, and other common business identifiers.
         """
         entities: dict[str, set[str]] = {
-            "invoice_numbers": set(),
-            "order_ids": set(),
+            "reference_numbers": set(),
+            "numeric_ids": set(),
             "amounts": set(),
         }
 
+        # Parse existing summary back into sets for merging
+        for line in self.entity_summary.split("\n"):
+            line = line.strip().lstrip("- ")
+            if line.startswith("Reference Numbers:"):
+                for v in line.split(":", 1)[1].split(","):
+                    v = v.strip()
+                    if v:
+                        entities["reference_numbers"].add(v)
+            elif line.startswith("Numeric Ids:"):
+                for v in line.split(":", 1)[1].split(","):
+                    v = v.strip()
+                    if v:
+                        entities["numeric_ids"].add(v)
+            elif line.startswith("Amounts:"):
+                for v in line.split(":", 1)[1].split(","):
+                    v = v.strip()
+                    if v:
+                        entities["amounts"].add(v)
+
+        # Extract reference numbers with entity keywords
         for match in re.finditer(
-            r"(?:invoice|order|po|purchase\s*order)\s*(?:number|#|id|no\.?)?\s*:?\s*([A-Z]*-?\d{3,})",
+            r"(?:invoice|order|po|purchase\s*order|contract|ticket|case|"
+            r"serial|batch|lot|ref|shipment|delivery|receipt)"
+            r"\s*(?:number|#|id|no\.?)?\s*:?\s*([A-Z]*-?\d{3,})",
             text, re.IGNORECASE,
         ):
-            entities["invoice_numbers"].add(match.group(1))
+            entities["reference_numbers"].add(match.group(1))
 
+        # Bare numeric IDs (5+ digits to avoid false positives)
         for match in re.finditer(r"\b(\d{5,})\b", text):
-            entities["order_ids"].add(match.group(1))
+            entities["numeric_ids"].add(match.group(1))
 
+        # Currency amounts (multi-currency)
         for match in re.finditer(
-            r"\$[\d,]+\.?\d*|\d+[\d,]*\.?\d*\s*(?:dollars|usd)",
+            r"[$€£¥][\d,]+\.?\d*|\d+[\d,]*\.?\d*\s*(?:dollars|usd|eur|gbp)",
             text, re.IGNORECASE,
         ):
             entities["amounts"].add(match.group(0))
@@ -166,7 +216,6 @@ class TranscriptBuffer:
                 parts.append(f"- {label}: {', '.join(sorted(values))}")
 
         if parts:
-            # Cap entity summary to prevent unbounded growth
             self.entity_summary = "\n".join(parts)[:2000]
 
 
@@ -175,3 +224,75 @@ def claim_fingerprint(text: str) -> str:
     text = text.lower()
     text = re.sub(r"[^\w\s]", "", text)
     return " ".join(text.split())
+
+
+# ---------------------------------------------------------------------------
+# Discriminator boosting for deduplication
+# ---------------------------------------------------------------------------
+
+_MONTH_NAMES = frozenset({
+    "january", "jan", "february", "feb", "march", "mar",
+    "april", "apr", "may", "june", "jun", "july", "jul",
+    "august", "aug", "september", "sep", "october", "oct",
+    "november", "nov", "december", "dec",
+})
+_QUARTER_RE = re.compile(r"^q[1-4]$")
+_NUMBER_RE = re.compile(r"^\d+$")
+
+# Repeat count for boosted tokens.  3× means changing a single
+# discriminator shifts at least 2 bag items, dropping Jaccard well
+# below the 0.8 default threshold.
+_BOOST_FACTOR = 3
+
+
+def _is_discriminator(token: str) -> bool:
+    """Return True if the token carries high semantic weight for dedup.
+
+    Called on *lowercased* fingerprint tokens (``claim_fingerprint``
+    normalises to lowercase), so entity-ID detection uses the original
+    text pattern instead of an upper-case regex.
+    """
+    if token in _MONTH_NAMES:
+        return True
+    if _QUARTER_RE.match(token):
+        return True
+    if _NUMBER_RE.match(token) and len(token) >= 3:
+        return True
+    # Currency amounts stripped of punctuation become pure digits — caught above.
+    # All-alpha tokens ≥3 chars that aren't common English words are likely
+    # entity/customer IDs (vinet, tomsp).  We keep the check broad because
+    # false positives only add a small constant cost.
+    if token.isalpha() and len(token) >= 4 and token not in _COMMON_WORDS:
+        return True
+    return False
+
+
+# Common short words that should NOT be boosted as entity IDs.
+_COMMON_WORDS = frozenset({
+    "the", "and", "for", "from", "with", "that", "this", "have",
+    "been", "were", "they", "their", "which", "about", "would",
+    "there", "each", "every", "some", "what", "when", "where",
+    "more", "most", "also", "just", "only", "than", "then",
+    "into", "over", "such", "after", "before", "between",
+    "total", "price", "count", "number", "order", "invoice",
+    "report", "stock", "purchase", "shipping", "delivery",
+    "document", "documents", "customer", "invoices", "orders",
+    "reports", "items", "products", "list", "give", "show",
+    "many", "much", "all", "how", "does", "are", "was", "not",
+})
+
+
+def _boosted_word_bag(fingerprint: str) -> set[str]:
+    """Build a word bag with discriminator tokens repeated for boost.
+
+    Normal tokens appear once.  Discriminators appear ``_BOOST_FACTOR``
+    times using suffixed copies (e.g. ``july``, ``july__1``, ``july__2``)
+    so the set-based Jaccard calculation gives them more weight.
+    """
+    bag: set[str] = set()
+    for token in fingerprint.split():
+        bag.add(token)
+        if _is_discriminator(token):
+            for i in range(1, _BOOST_FACTOR):
+                bag.add(f"{token}__{i}")
+    return bag

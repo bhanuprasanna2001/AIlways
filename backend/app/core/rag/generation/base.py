@@ -21,12 +21,18 @@ class Generator(Protocol):
         2. Update ``get_generator()`` in ``generation/__init__.py``.
     """
 
-    async def generate(self, query: str, results: list[SearchResult]) -> AnswerResult:
+    async def generate(
+        self,
+        query: str,
+        results: list[SearchResult],
+        history: list[dict[str, str]] | None = None,
+    ) -> AnswerResult:
         """Generate a grounded answer from retrieved context.
 
         Args:
             query: The user's question.
             results: Search results from the retrieval module.
+            history: Optional conversation history for multi-turn context.
 
         Returns:
             AnswerResult: Structured answer with citations and confidence.

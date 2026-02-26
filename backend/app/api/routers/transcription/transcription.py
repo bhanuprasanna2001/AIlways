@@ -16,6 +16,7 @@ from sqlmodel import select, func
 
 from app.db import get_db, get_db_session
 from app.db.models import User
+from app.db.models.vault import Vault
 from app.db.models.transcription_session import TranscriptionSession
 from app.core.auth.deps import get_current_user, require_vault_member, authenticate_websocket
 from app.core.config import get_settings
@@ -104,46 +105,59 @@ async def transcribe_audio(
     verdicts_response: list[ClaimVerdictResponse] = []
 
     if SETTINGS.CLAIM.DETECTION_ENABLED and transcript.segments:
-        from app.core.claims import get_claim_detector, get_claim_verifier
+        from app.core.copilot import extract_statements, verify_statement
 
-        detector = get_claim_detector()
         try:
-            claims = await asyncio.wait_for(
-                detector.detect_claims(transcript.segments),
+            statements = await asyncio.wait_for(
+                extract_statements(transcript.segments),
                 timeout=SETTINGS.API_TIMEOUT_S,
             )
         except asyncio.TimeoutError:
-            logger.warning("Claim detection timed out — returning transcript without claims")
-            claims = []
+            logger.warning("Statement extraction timed out — returning transcript without claims")
+            statements = []
 
         claims_response = [
             ClaimResponse(
-                id=c.id, text=c.text, speaker=c.speaker,
-                timestamp_start=c.timestamp_start, timestamp_end=c.timestamp_end,
-                context=c.context,
+                id=s.id, text=s.text, speaker=s.speaker,
+                timestamp_start=s.timestamp_start, timestamp_end=s.timestamp_end,
+                context=s.context,
             )
-            for c in claims
+            for s in statements
         ]
 
-        if claims:
-            verifier = get_claim_verifier()
+        if statements:
+            vault_updated_at: str | None = None
+            if SETTINGS.COPILOT.VERIFICATION_CACHE_ENABLED:
+                result = await db.execute(
+                    select(Vault.updated_at).where(Vault.id == vault_id)
+                )
+                updated_at = result.scalar_one_or_none()
+                vault_updated_at = updated_at.isoformat() if updated_at else None
+
             raw_verdicts = await asyncio.gather(*[
                 asyncio.wait_for(
-                    verifier.verify_claim(c, vault_id, db),
+                    verify_statement(
+                        s,
+                        vault_id,
+                        vault_updated_at=vault_updated_at,
+                    ),
                     timeout=SETTINGS.API_TIMEOUT_S,
                 )
-                for c in claims
+                for s in statements
             ], return_exceptions=True)
 
             for v in raw_verdicts:
                 if isinstance(v, BaseException):
-                    logger.warning(f"Claim verification failed: {v}")
+                    logger.warning(f"Statement verification failed: {v}")
                     continue
                 verdicts_response.append(
                     ClaimVerdictResponse(
                         claim_id=v.claim_id, claim_text=v.claim_text,
                         verdict=v.verdict, confidence=v.confidence,
                         explanation=v.explanation, evidence=v.evidence,
+                        verification_path=v.verification_path,
+                        latency_ms=v.latency_ms,
+                        cache_hit=v.cache_hit,
                     )
                 )
 

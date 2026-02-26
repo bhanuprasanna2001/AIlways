@@ -23,9 +23,19 @@
 
 ---
 
+## Video
+
+<div align="center">
+
+[![AIlways Demo Video](https://img.youtube.com/vi/R7A8SB_S_Z4/0.jpg)](https://www.youtube.com/watch?v=R7A8SB_S_Z4)
+
+</div>
+
+---
+
 ## The Problem
 
-Someone in a meeting says *"Invoice 10332 totals $4,500"* — but the actual invoice says **$3,850**. Nobody catches it. The decision moves forward on bad data.
+Someone in a meeting says *"Invoice 10332 totals \$4,500"* — but the actual invoice says **$3,850**. Nobody catches it. The decision moves forward on bad data.
 
 Enterprise teams make critical decisions referencing documents they can't search fast enough — invoices, purchase orders, shipping records, inventory reports. Tables break across PDF pages, exact IDs get buried in near-identical documents, and nobody fact-checks claims in real time.
 

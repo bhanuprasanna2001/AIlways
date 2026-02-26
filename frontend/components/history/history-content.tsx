@@ -1,19 +1,33 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import useSWR from "swr";
 import { Clock, Trash2, Search } from "lucide-react";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Modal } from "@/components/ui/modal";
+import { Badge } from "@/components/ui/badge";
+import { Pagination, paginate } from "@/components/ui/pagination";
 import { useConversations } from "@/hooks/use-conversations";
+import { fetcher } from "@/lib/api";
 import { formatRelativeTime, truncate } from "@/lib/utils";
+import type { Vault } from "@/lib/types";
 
 export default function HistoryContent() {
   const router = useRouter();
   const { conversations, removeConversation, clearAll } = useConversations();
+  const { data: vaults } = useSWR<Vault[]>("/api/vaults", fetcher);
   const [search, setSearch] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [showClearAll, setShowClearAll] = useState(false);
+  const [page, setPage] = useState(1);
+  const ITEMS_PER_PAGE = 10;
+
+  // Set of active vault IDs for fast lookup
+  const activeVaultIds = useMemo(
+    () => new Set(vaults?.map((v) => v.id)),
+    [vaults],
+  );
 
   const filtered = useMemo(() => {
     if (!search) return conversations;
@@ -24,6 +38,16 @@ export default function HistoryContent() {
         c.vault_name.toLowerCase().includes(term),
     );
   }, [conversations, search]);
+
+  const { paged, totalPages } = useMemo(
+    () => paginate(filtered, page, ITEMS_PER_PAGE),
+    [filtered, page],
+  );
+
+  // Reset to page 1 when search changes
+  useEffect(() => {
+    setPage(1);
+  }, [search]);
 
   // ---- Empty state ----
   if (conversations.length === 0) {
@@ -73,8 +97,9 @@ export default function HistoryContent() {
           No conversations match your search
         </p>
       ) : (
+        <>
         <div className="space-y-2">
-          {filtered.map((conv) => (
+          {paged.map((conv) => (
             <div
               key={conv.id}
               className="group flex items-center justify-between rounded-xl border border-neutral-200 px-4 py-3 transition-colors hover:bg-neutral-50 dark:border-neutral-800 dark:hover:bg-neutral-800/30"
@@ -85,9 +110,14 @@ export default function HistoryContent() {
                 }
                 className="flex-1 text-left"
               >
-                <p className="text-sm font-medium text-foreground">
-                  {truncate(conv.title, 80)}
-                </p>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-medium text-foreground">
+                    {truncate(conv.title, 80)}
+                  </p>
+                  {vaults && !activeVaultIds.has(conv.vault_id) && (
+                    <Badge variant="warning">Vault deleted</Badge>
+                  )}
+                </div>
                 <p className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">
                   {conv.vault_name} · {conv.messages.length} message
                   {conv.messages.length !== 1 ? "s" : ""} ·{" "}
@@ -104,6 +134,8 @@ export default function HistoryContent() {
             </div>
           ))}
         </div>
+        <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
+        </>
       )}
 
       {/* Delete single confirmation */}

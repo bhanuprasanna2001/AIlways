@@ -18,6 +18,11 @@ logger = setup_logger(__name__)
 
 SETTINGS = get_settings()
 
+# Module-level flag: set to True after the first successful BM25 query,
+# or False after the first failure.  Avoids flooding logs with repeated
+# warnings on every single query when ParadeDB is not installed.
+_bm25_available: bool | None = None
+
 
 async def sparse_search(
     query_text: str,
@@ -43,6 +48,8 @@ async def sparse_search(
     if not sanitized:
         return []
 
+    global _bm25_available
+
     query = text("""
         SELECT c.id, c.doc_id, c.content, c.content_with_header,
                paradedb.score(c.id) AS score,
@@ -66,8 +73,19 @@ async def sparse_search(
             "top_k": top_k,
         })
     except Exception as e:
-        logger.warning(f"BM25 search failed (ParadeDB may not be installed): {e}")
+        if _bm25_available is not False:
+            # Log at ERROR level on the first failure so it's clearly visible
+            logger.error(
+                f"BM25 search unavailable (ParadeDB may not be installed): {e}. "
+                f"Falling back to dense-only retrieval. This SIGNIFICANTLY degrades "
+                f"search quality for entity lookups (invoices, orders, etc.)."
+            )
+            _bm25_available = False
         return []
+
+    if _bm25_available is None:
+        logger.info("BM25 search (ParadeDB) is available and operational")
+        _bm25_available = True
 
     return [
         SearchResult(

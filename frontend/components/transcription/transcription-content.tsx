@@ -12,6 +12,7 @@ import {
   AlertTriangle,
   Loader2,
   Monitor,
+  ChevronRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { VERDICT_LABELS, VERDICT_VARIANT } from "@/lib/constants";
@@ -20,6 +21,7 @@ import { fetcher } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
 import { EmptyState } from "@/components/ui/empty-state";
+import { CitationCard } from "@/components/ui/citation-card";
 import {
   useTranscription,
   type LiveSegment,
@@ -41,6 +43,23 @@ function formatTimestamp(secs: number): string {
   const m = Math.floor(secs / 60);
   const s = Math.floor(secs % 60);
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function formatLatency(ms?: number | null): string {
+  if (ms === null || ms === undefined) return "";
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
+}
+
+function verificationLabel(path?: string | null, cacheHit?: boolean): string | null {
+  if (cacheHit) return "cache";
+  if (!path) return null;
+  const labels: Record<string, string> = {
+    aggregate_fast: "fast",
+    aggregate_fallback: "fallback",
+    crag: "llm",
+  };
+  return labels[path] ?? path;
 }
 
 const SPEAKER_COLORS = [
@@ -111,11 +130,15 @@ function SegmentList({ segments }: { segments: LiveSegment[] }) {
 }
 
 function ClaimCard({ claim }: { claim: LiveClaim }) {
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+  const latencyText = formatLatency(claim.latency_ms);
+  const pathLabel = verificationLabel(claim.verification_path, claim.cache_hit);
+
   return (
-    <div className="rounded-lg border border-neutral-200 px-3 py-2.5 dark:border-neutral-700">
+    <div className="overflow-hidden rounded-lg border border-neutral-200 px-3 py-2.5 dark:border-neutral-700">
       <div className="flex items-start gap-2">
         <span className="mt-0.5">{VERDICT_ICONS[claim.verdict]}</span>
-        <div className="flex-1">
+        <div className="min-w-0 flex-1">
           <p className="text-sm text-foreground">{claim.text}</p>
           <div className="mt-1 flex items-center gap-2">
             <Badge variant={VERDICT_VARIANT[claim.verdict] ?? "neutral"}>
@@ -130,10 +153,40 @@ function ClaimCard({ claim }: { claim: LiveClaim }) {
               Speaker {claim.speaker + 1}
             </span>
           </div>
+          {(latencyText || pathLabel) && (
+            <div className="mt-1 text-[10px] text-neutral-400">
+              {pathLabel}
+              {pathLabel && latencyText ? " • " : ""}
+              {latencyText}
+            </div>
+          )}
           {claim.explanation && (
             <p className="mt-1.5 text-xs text-neutral-500 dark:text-neutral-400">
               {claim.explanation}
             </p>
+          )}
+          {claim.evidence && claim.evidence.length > 0 && (
+            <div className="mt-2">
+              <button
+                onClick={() => setSourcesOpen(!sourcesOpen)}
+                className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-neutral-400 transition-colors hover:text-neutral-600 dark:hover:text-neutral-300"
+              >
+                <ChevronRight
+                  className={cn(
+                    "h-3 w-3 transition-transform",
+                    sourcesOpen && "rotate-90",
+                  )}
+                />
+                Sources ({claim.evidence.length})
+              </button>
+              {sourcesOpen && (
+                <div className="mt-1.5 space-y-1.5">
+                  {claim.evidence.map((cit, idx) => (
+                    <CitationCard key={idx} citation={cit} index={idx} />
+                  ))}
+                </div>
+              )}
+            </div>
           )}
         </div>
       </div>

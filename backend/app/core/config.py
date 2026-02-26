@@ -31,6 +31,50 @@ class ClaimConfig(BaseSettings):
     VERIFICATION_MMR_LAMBDA: float = 1.0
     EXTRACT_FROM_QUESTIONS: bool = True
 
+    # Short segments containing entity anchors bypass word-count filter.
+    # Patterns: numeric IDs (4+ digits), dollar amounts, entity keywords.
+    SEGMENT_ENTITY_BYPASS: bool = True
+
+
+class CopilotConfig(BaseSettings):
+    """Agentic copilot — LangGraph-based extraction & verification settings."""
+    model_config = SettingsConfigDict(env_prefix="COPILOT_", env_file=".env", extra="ignore")
+
+    # Extraction — model used to pull verifiable statements from transcript
+    EXTRACTION_MODEL: str = ""  # defaults to GROQ_MODEL if empty
+    EXTRACTION_TEMPERATURE: float = 0.1
+    EXTRACTION_MAX_RETRIES: int = 3
+
+    # Verification — LangGraph self-corrective retrieval graph
+    VERIFICATION_MODEL: str = ""  # defaults to OPENAI_QUERY_MODEL if empty
+    VERIFICATION_TEMPERATURE: float = 0.0
+    VERIFICATION_TOP_K: int = 8
+    VERIFICATION_AGGREGATE_TOP_K: int = 50
+    VERIFICATION_MAX_SEARCH_ATTEMPTS: int = 3
+    VERIFICATION_MMR_LAMBDA: float = 1.0
+    VERIFICATION_CACHE_ENABLED: bool = True
+    VERIFICATION_CACHE_TTL_S: float = 300.0
+    AGGREGATE_FASTPATH_ENABLED: bool = True
+    AGGREGATE_FALLBACK_ENABLED: bool = False
+    AGGREGATE_REQUIRE_COMPLETE_METADATA: bool = True
+    AGGREGATE_LIST_MAX_DOCS: int = 50
+    AGGREGATE_EVIDENCE_MAX_DOCS: int = 50
+
+    # Grading — fast model to grade retrieval relevance before synthesis
+    GRADING_MODEL: str = ""  # defaults to OPENAI_QUERY_MODEL if empty
+    GRADING_TEMPERATURE: float = 0.0
+
+    # Query agent — ReAct agent for copilot chat
+    AGENT_MODEL: str = ""  # defaults to OPENAI_REASONING_MODEL if empty
+    AGENT_TEMPERATURE: float = 0.1
+    AGENT_MAX_ITERATIONS: int = 6
+    AGENT_MAX_FULL_DOC_CALLS: int = 3
+    AGENT_TIMEOUT_S: float = 120.0
+    AGENT_LLM_CALL_TIMEOUT_S: float = 45.0
+
+    # filter_documents tool — SQL-backed structured query
+    FILTER_DOCUMENTS_MAX_RESULTS: int = 100
+
 
 class TranscriptionConfig(BaseSettings):
     """Transcription session & audio settings."""
@@ -44,6 +88,32 @@ class TranscriptionConfig(BaseSettings):
     SESSION_TITLE_MAX_LENGTH: int = 255
     WS_TICKET_TTL_S: int = 60
     MAX_AUDIO_SIZE_MB: int = 100
+
+
+class MetadataConfig(BaseSettings):
+    """Document metadata extraction settings.
+
+    Controls LLM-based metadata extraction at ingestion time.
+    The extractor produces: summary, keywords, hypothetical questions
+    (HyDE), document_type, entity_id, and structured entities.
+    A synthetic "metadata chunk" is created per document for HyDE
+    retrieval — it participates in ALL existing search paths.
+    """
+    model_config = SettingsConfigDict(env_prefix="METADATA_", env_file=".env", extra="ignore")
+
+    # LLM extraction — set ENABLED=false for zero-cost regex-only fallback
+    ENABLED: bool = True
+    MODEL: str = ""  # defaults to OPENAI_QUERY_MODEL if empty
+    TEMPERATURE: float = 0.0
+    MAX_RETRIES: int = 2
+
+    # Content truncation — first N chars sent to the LLM for extraction
+    MAX_CONTENT_CHARS: int = 8000
+
+    # Output sizing
+    SUMMARY_MAX_WORDS: int = 80
+    KEYWORDS_COUNT: int = 8
+    HYPOTHETICAL_QUESTIONS_COUNT: int = 3
 
 
 class WorkerConfig(BaseSettings):
@@ -132,6 +202,18 @@ class Settings(BaseSettings):
     RAG_SEARCH_TOP_K: int = 5
     RAG_GENERATION_TEMPERATURE: float = 0.1
 
+    # Query rewriting — resolves pronouns and co-references using
+    # conversation history so the retrieval query is always standalone.
+    QUERY_REWRITE_ENABLED: bool = True
+    QUERY_REWRITE_MODEL: str = ""  # defaults to OPENAI_QUERY_MODEL if empty
+    QUERY_HISTORY_MAX_TURNS: int = 10
+
+    # Entity-aware retrieval — direct SQL lookup for entity IDs
+    # (invoice numbers, order numbers) before embedding search.
+    ENTITY_SEARCH_ENABLED: bool = True
+    ENTITY_SEARCH_MAX_IDS: int = 10
+    ENTITY_SEARCH_LIMIT: int = 20
+
     # Kafka / Redpanda
     KAFKA_BOOTSTRAP_SERVERS: str = "localhost:19092"
     KAFKA_CONSUMER_GROUP: str = "ailways-workers"
@@ -147,8 +229,10 @@ class Settings(BaseSettings):
     DB_POOL_PRE_PING: bool = True
 
     # External API timeouts
-    API_TIMEOUT_S: float = 30.0
-    EMBEDDING_TIMEOUT_S: float = 60.0
+    API_TIMEOUT_S: float = 60.0
+    EMBEDDING_TIMEOUT_S: float = 120.0
+    EMBEDDING_MAX_RETRIES: int = 3
+    EMBEDDING_RETRY_BASE_DELAY_S: float = 1.0
 
     # WebSocket
     WS_HEARTBEAT_INTERVAL_S: float = 30.0
@@ -170,6 +254,8 @@ class Settings(BaseSettings):
 
     # Grouped sub-configs
     CLAIM: ClaimConfig = ClaimConfig()
+    COPILOT: CopilotConfig = CopilotConfig()
+    METADATA: MetadataConfig = MetadataConfig()
     TRANSCRIPTION: TranscriptionConfig = TranscriptionConfig()
     WORKER: WorkerConfig = WorkerConfig()
 

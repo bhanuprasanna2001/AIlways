@@ -1,8 +1,12 @@
-"""Claim processing pipeline — detection and concurrent verification.
+"""Copilot-powered verification pipeline — extraction and concurrent verification.
 
 Extracted from the live transcription WebSocket handler. Handles
-the detect → deduplicate → persist → verify → notify lifecycle
+the extract → deduplicate → persist → verify → notify lifecycle
 for a captured batch of transcript segments.
+
+Uses the LangGraph-based copilot module:
+  - ``extract_statements`` for pulling verifiable facts from transcript
+  - ``verify_statement`` for self-corrective retrieval + verdict synthesis
 """
 
 from __future__ import annotations
@@ -11,15 +15,17 @@ import asyncio
 from uuid import UUID
 
 from fastapi import WebSocket
+from sqlmodel import select
 
-from app.core.claims import get_claim_detector, get_claim_verifier
-from app.core.claims.base import Claim
+from app.core.copilot import extract_statements, verify_statement
+from app.core.copilot.base import Statement
 from app.core.transcription.base import TranscriptSegment
 from app.core.transcription.buffer import TranscriptBuffer
 from app.core.transcription.persistence import SessionPersistence
 from app.core.config import get_settings
 from app.core.logger import setup_logger
 from app.db import get_db_session
+from app.db.models.vault import Vault
 
 from app.api.routers.transcription.schemas import (
     WSClaimDetectedMessage,
@@ -31,6 +37,13 @@ logger = setup_logger(__name__)
 SETTINGS = get_settings()
 
 
+async def _get_vault_updated_at(vault_id: UUID) -> str | None:
+    async with get_db_session() as db:
+        result = await db.execute(select(Vault.updated_at).where(Vault.id == vault_id))
+        updated_at = result.scalar_one_or_none()
+    return updated_at.isoformat() if updated_at else None
+
+
 def spawn_claim_task(
     websocket: WebSocket,
     buffer: TranscriptBuffer,
@@ -39,7 +52,7 @@ def spawn_claim_task(
     claim_tasks: set[asyncio.Task],
     claim_semaphore: asyncio.Semaphore,
 ) -> None:
-    """Capture unchecked segments and create a background claim task.
+    """Capture unchecked segments and create a background verification task.
 
     The batch is captured synchronously so the pointer advances
     immediately, preventing duplicate processing on the next timer tick.
@@ -52,7 +65,7 @@ def spawn_claim_task(
 
     async def _guarded_process() -> None:
         async with claim_semaphore:
-            await process_claims_batch(
+            await process_statements_batch(
                 websocket, buffer, persistence, vault_id,
                 context_segments, unchecked, entity_summary,
             )
@@ -62,7 +75,7 @@ def spawn_claim_task(
     task.add_done_callback(claim_tasks.discard)
 
 
-async def process_claims_batch(
+async def process_statements_batch(
     websocket: WebSocket,
     buffer: TranscriptBuffer,
     persistence: SessionPersistence,
@@ -71,11 +84,11 @@ async def process_claims_batch(
     unchecked: list[TranscriptSegment],
     entity_summary: str,
 ) -> None:
-    """Detect claims from a captured batch and verify them concurrently."""
+    """Extract statements from a captured batch and verify them with the LangGraph CRAG pipeline."""
     try:
-        detector = get_claim_detector()
-        claims = await asyncio.wait_for(
-            detector.detect_claims(
+        # 1. Extract verifiable statements (single Groq LLM call)
+        statements = await asyncio.wait_for(
+            extract_statements(
                 segments=unchecked,
                 context_segments=context_segments or None,
                 entity_summary=entity_summary,
@@ -83,59 +96,66 @@ async def process_claims_batch(
             timeout=SETTINGS.API_TIMEOUT_S,
         )
 
-        new_claims = buffer.deduplicate_claims(claims)
-        buffer.claims_detected += len(new_claims)
+        # 2. Deduplicate against previously seen statements
+        new_statements = buffer.deduplicate_claims(statements)
+        buffer.claims_detected += len(new_statements)
 
+        # 3. Update entity tracker
         all_text = " ".join(s.text for s in (context_segments or []) + unchecked)
         buffer.update_entities(all_text)
 
-        if not new_claims:
+        if not new_statements:
             return
 
-        # Persist + notify all detected claims (fast, no external API calls).
-        # WS sends are best-effort — if closed, we still persist and verify.
+        # 4. Persist + notify all detected statements
         ws_alive = True
-        claim_db_ids: dict[str, UUID] = {}
-        for claim in new_claims:
+        statement_db_ids: dict[str, UUID] = {}
+        for stmt in new_statements:
             try:
-                db_id = await persistence.persist_claim(claim)
-                claim_db_ids[claim.id] = db_id
+                db_id = await persistence.persist_claim(stmt)
+                statement_db_ids[stmt.id] = db_id
             except Exception as exc:
-                logger.error(f"Failed to persist claim '{claim.text[:50]}': {exc}")
+                logger.error(f"Failed to persist statement '{stmt.text[:50]}': {exc}")
 
             if ws_alive:
                 try:
                     msg = WSClaimDetectedMessage(
-                        claim_id=claim.id, text=claim.text, speaker=claim.speaker,
+                        claim_id=stmt.id, text=stmt.text, speaker=stmt.speaker,
                     )
                     await websocket.send_json(msg.model_dump())
                 except Exception:
                     ws_alive = False
 
-        # Verify all claims concurrently (each with its own DB session)
-        verifier = get_claim_verifier()
+        # 5. Verify all statements concurrently via LangGraph CRAG graph
+        vault_updated_at: str | None = None
+        if SETTINGS.COPILOT.VERIFICATION_CACHE_ENABLED:
+            vault_updated_at = await _get_vault_updated_at(vault_id)
 
-        async def _verify_one(claim: Claim):
+        async def _verify_one(stmt: Statement):
             try:
-                async with get_db_session() as db:
-                    return await asyncio.wait_for(
-                        verifier.verify_claim(claim, vault_id, db),
-                        timeout=SETTINGS.API_TIMEOUT_S,
-                    )
+                return await asyncio.wait_for(
+                    verify_statement(
+                        stmt,
+                        vault_id,
+                        vault_updated_at=vault_updated_at,
+                    ),
+                    timeout=SETTINGS.API_TIMEOUT_S,
+                )
             except asyncio.TimeoutError:
-                logger.warning(f"Verification timed out for '{claim.text[:50]}'")
+                logger.warning(f"Verification timed out for '{stmt.text[:50]}'")
                 return None
             except Exception as exc:
-                logger.error(f"Verification failed for '{claim.text[:50]}': {exc}")
+                logger.error(f"Verification failed for '{stmt.text[:50]}': {exc}")
                 return None
 
-        verdicts = await asyncio.gather(*[_verify_one(c) for c in new_claims])
+        verdicts = await asyncio.gather(*[_verify_one(s) for s in new_statements])
 
-        for claim, verdict in zip(new_claims, verdicts):
+        # 6. Persist verdicts + notify via WebSocket
+        for stmt, verdict in zip(new_statements, verdicts):
             if verdict is None:
                 continue
 
-            db_id = claim_db_ids.get(claim.id)
+            db_id = statement_db_ids.get(stmt.id)
             if db_id:
                 try:
                     evidence_dicts = [
@@ -150,7 +170,7 @@ async def process_claims_batch(
                         evidence=evidence_dicts,
                     )
                 except Exception as exc:
-                    logger.error(f"Failed to persist verdict for '{claim.text[:50]}': {exc}")
+                    logger.error(f"Failed to persist verdict for '{stmt.text[:50]}': {exc}")
 
             if ws_alive:
                 try:
@@ -161,12 +181,15 @@ async def process_claims_batch(
                         confidence=verdict.confidence,
                         explanation=verdict.explanation,
                         evidence=verdict.evidence,
+                        verification_path=verdict.verification_path,
+                        latency_ms=verdict.latency_ms,
+                        cache_hit=verdict.cache_hit,
                     )
                     await websocket.send_json(msg.model_dump())
                 except Exception:
                     ws_alive = False
 
     except asyncio.TimeoutError:
-        logger.warning("Claim detection timed out")
+        logger.warning("Statement extraction timed out")
     except Exception as e:
-        logger.error(f"Claim processing error: {e}")
+        logger.error(f"Statement processing error: {e}")
