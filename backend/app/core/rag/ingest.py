@@ -140,6 +140,12 @@ async def ingest_document(
         texts = [cd.content_with_header for cd in chunk_data]
         embeddings = await embedder.embed_documents(texts)
 
+        # 6a. Post-embed deletion check — abort if deleted during embedding
+        doc = await _get_doc(db, doc_id)
+        if doc.deleted_at is not None or doc.status in ("pending_delete", "deleted"):
+            logger.info(f"Document {doc_id} was deleted during embedding — aborting")
+            return 0
+
         # 7. Bulk insert chunks
         chunk_records = [
             Chunk(
@@ -350,25 +356,52 @@ async def batch_embed_and_store(
     total_chunks = len(all_texts)
     logger.info(f"Batch embedding {total_chunks} chunks across {len(prepared)} documents")
 
-    # Single embedding API call for ALL chunks
+    # Embed — batch first, per-document fallback on failure
+    all_embeddings: list = []
+    failed_doc_ids: set[UUID] = set()
+
     try:
         all_embeddings = await embedder.embed_documents(all_texts)
-    except Exception as e:
-        logger.error(f"Batch embedding failed: {e}")
-        # Mark all docs as failed
-        for pdoc in prepared:
+    except Exception as batch_err:
+        logger.warning(
+            "Batch embedding failed (%s), falling back to per-document embedding",
+            batch_err,
+        )
+        all_embeddings = [None] * len(all_texts)
+        for pdoc, start, end in doc_offsets:
+            doc_texts = all_texts[start:end]
             try:
-                await _set_status(db, pdoc.doc_id, "failed", error_message=f"Embedding failed: {e}"[:500])
-            except Exception:
-                pass
-        await db.commit()
-        return {}
+                doc_embeddings = await embedder.embed_documents(doc_texts)
+                all_embeddings[start:end] = doc_embeddings
+            except Exception as doc_err:
+                logger.error("Per-document embedding failed for %s: %s", pdoc.doc_id, doc_err)
+                failed_doc_ids.add(pdoc.doc_id)
+                try:
+                    await _set_status(
+                        db, pdoc.doc_id, "failed",
+                        error_message=f"Embedding failed: {doc_err}"[:500],
+                    )
+                except Exception:
+                    pass
+
+        if len(failed_doc_ids) == len(prepared):
+            await db.commit()
+            return {}
 
     # Build and store chunks per document (using savepoints for isolation)
     results: dict[UUID, int] = {}
     for pdoc, start, end in doc_offsets:
+        if pdoc.doc_id in failed_doc_ids:
+            continue
+
         try:
             async with db.begin_nested():
+                # Pre-store deletion check — abort if deleted during embedding
+                doc = await _get_doc(db, pdoc.doc_id)
+                if doc.deleted_at is not None or doc.status in ("pending_delete", "deleted"):
+                    logger.info(f"Document {pdoc.doc_id} was deleted during embedding — skipping")
+                    continue
+
                 doc_embeddings = all_embeddings[start:end]
                 chunk_records = [
                     Chunk(
@@ -390,7 +423,6 @@ async def batch_embed_and_store(
 
                 # Update document with extracted metadata
                 meta = pdoc.metadata
-                doc = await _get_doc(db, pdoc.doc_id)
                 doc.status = "active"
                 doc.error_message = None
                 doc.updated_at = utcnow()

@@ -69,6 +69,8 @@ class CopilotConfig(BaseSettings):
     AGENT_TEMPERATURE: float = 0.1
     AGENT_MAX_ITERATIONS: int = 6
     AGENT_MAX_FULL_DOC_CALLS: int = 3
+    AGENT_TIMEOUT_S: float = 120.0
+    AGENT_LLM_CALL_TIMEOUT_S: float = 45.0
 
     # filter_documents tool — SQL-backed structured query
     FILTER_DOCUMENTS_MAX_RESULTS: int = 100
@@ -228,7 +230,9 @@ class Settings(BaseSettings):
 
     # External API timeouts
     API_TIMEOUT_S: float = 60.0
-    EMBEDDING_TIMEOUT_S: float = 60.0
+    EMBEDDING_TIMEOUT_S: float = 120.0
+    EMBEDDING_MAX_RETRIES: int = 3
+    EMBEDDING_RETRY_BASE_DELAY_S: float = 1.0
 
     # WebSocket
     WS_HEARTBEAT_INTERVAL_S: float = 30.0

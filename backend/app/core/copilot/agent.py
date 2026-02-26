@@ -126,10 +126,27 @@ async def agent_node(state: AgentState) -> dict:
 
     The LLM decides whether to call a tool or produce a final response.
     LangGraph's ``tools_condition`` routes accordingly.
+
+    Each LLM call is individually timeout-guarded so a single stalled
+    OpenAI response cannot consume the entire agent budget.
     """
     llm = _get_agent_llm()
-    response = await llm.ainvoke(state["messages"])
-    return {"messages": [response]}
+    try:
+        response = await asyncio.wait_for(
+            llm.ainvoke(state["messages"]),
+            timeout=SETTINGS.COPILOT.AGENT_LLM_CALL_TIMEOUT_S,
+        )
+        return {"messages": [response]}
+    except asyncio.TimeoutError:
+        logger.warning("Agent LLM call timed out — forcing answer with available data")
+        return {
+            "messages": [
+                AIMessage(content=(
+                    "I apologize, but the response is taking too long. "
+                    "Let me compile an answer based on the information I've already gathered."
+                )),
+            ],
+        }
 
 
 def guard_rails(state: AgentState) -> dict:
@@ -480,10 +497,13 @@ async def query_vault_agent(
                 {"messages": messages, "iteration_count": 0, "full_doc_calls": 0},
                 config=config,
             ),
-            timeout=SETTINGS.API_TIMEOUT_S,
+            timeout=SETTINGS.COPILOT.AGENT_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
-        logger.error("Query agent timed out")
+        logger.error(
+            "Query agent timed out after %.0fs",
+            SETTINGS.COPILOT.AGENT_TIMEOUT_S,
+        )
         return CopilotAnswer(answer="Query timed out. Please try again.")
     except Exception as e:
         logger.error(f"Query agent failed: {e}")

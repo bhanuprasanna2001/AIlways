@@ -109,6 +109,11 @@ async def query_vault(
         )
 
     # Non-streaming path — full JSON response
+    # The agent manages its own timeout internally (COPILOT.AGENT_TIMEOUT_S)
+    # and returns a graceful CopilotAnswer on expiry. The outer guard here
+    # uses a slightly larger budget so the inner handler fires first,
+    # avoiding a raw 504 that hides the agent's partial-answer fallback.
+    agent_timeout = SETTINGS.COPILOT.AGENT_TIMEOUT_S + 10.0
     try:
         answer = await asyncio.wait_for(
             query_vault_agent(
@@ -117,7 +122,7 @@ async def query_vault(
                 history=history_dicts,
                 top_k=body.top_k,
             ),
-            timeout=SETTINGS.API_TIMEOUT_S,
+            timeout=agent_timeout,
         )
     except asyncio.TimeoutError:
         raise HTTPException(
