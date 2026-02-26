@@ -25,9 +25,7 @@
 
 ## Video
 
-<video width="100%" controls>
-    <source src="public/AIlways.mp4" type="video/mp4">
-</video>
+<iframe width="560" height="315" src="https://www.youtube.com/embed/R7A8SB_S_Z4?si=Piy8PwOl7LiF1osA" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
 
 ---
 
