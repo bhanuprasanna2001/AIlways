@@ -20,6 +20,7 @@ import { fetcher } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
 import { EmptyState } from "@/components/ui/empty-state";
+import { CitationCard } from "@/components/ui/citation-card";
 import {
   useTranscription,
   type LiveSegment,
@@ -112,10 +113,10 @@ function SegmentList({ segments }: { segments: LiveSegment[] }) {
 
 function ClaimCard({ claim }: { claim: LiveClaim }) {
   return (
-    <div className="rounded-lg border border-neutral-200 px-3 py-2.5 dark:border-neutral-700">
+    <div className="overflow-hidden rounded-lg border border-neutral-200 px-3 py-2.5 dark:border-neutral-700">
       <div className="flex items-start gap-2">
         <span className="mt-0.5">{VERDICT_ICONS[claim.verdict]}</span>
-        <div className="flex-1">
+        <div className="min-w-0 flex-1">
           <p className="text-sm text-foreground">{claim.text}</p>
           <div className="mt-1 flex items-center gap-2">
             <Badge variant={VERDICT_VARIANT[claim.verdict] ?? "neutral"}>
@@ -134,6 +135,16 @@ function ClaimCard({ claim }: { claim: LiveClaim }) {
             <p className="mt-1.5 text-xs text-neutral-500 dark:text-neutral-400">
               {claim.explanation}
             </p>
+          )}
+          {claim.evidence && claim.evidence.length > 0 && (
+            <div className="mt-2 space-y-1.5">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400">
+                Sources ({claim.evidence.length})
+              </p>
+              {claim.evidence.map((cit, idx) => (
+                <CitationCard key={idx} citation={cit} index={idx} />
+              ))}
+            </div>
           )}
         </div>
       </div>

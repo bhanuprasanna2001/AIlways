@@ -1,17 +1,17 @@
-"""Verification graph — LangGraph Corrective-RAG for statement verification.
+"""Verification graph — Adaptive Corrective-RAG for statement verification.
 
-Implements the self-corrective retrieval pattern:
+Implements an adaptive retrieval pattern that classifies statements
+before choosing a retrieval strategy:
 
-    retrieve → grade_relevance → [relevant?]
-        → yes: synthesise_verdict → END
-        → no:  transform_query → retrieve (retry, max N attempts)
+    classify -> route
+        -> point:     retrieve(top_k) -> grade -> [retry?] -> synthesise -> END
+        -> aggregate:  exhaustive_retrieve(top_k=30) -> synthesise -> END
 
-Each statement gets its own graph invocation. The pipeline runs
-multiple invocations concurrently via ``asyncio.gather``.
-
-This replaces the old ``RAGClaimVerifier`` with a LangGraph-based
-approach that automatically retries with reformulated queries when
-the first retrieval doesn't find relevant documents.
+Key design decisions:
+  - Aggregate queries ("all invoices from July 2016") use high top_k
+    to capture ALL matching documents, not just a sample.
+  - Point queries use the corrective-RAG loop with transform + retry.
+  - Classification is rule-based (no LLM call) for zero latency.
 """
 
 from __future__ import annotations
@@ -19,12 +19,13 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import TypedDict
+from typing import Literal, TypedDict
 from uuid import UUID
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, START, END
+from sqlmodel import select
 
 from app.core.copilot.base import Statement, Evidence, Verdict
 from app.core.copilot.prompts import (
@@ -42,10 +43,40 @@ from app.core.utils import normalize_numbers
 from app.core.config import get_settings
 from app.core.logger import setup_logger
 from app.db import get_db_session
+from app.db.models.chunk import Chunk
+from app.db.models.document import Document
 
 logger = setup_logger(__name__)
 
 SETTINGS = get_settings()
+
+
+# ---------------------------------------------------------------------------
+# Statement classification — rule-based, zero latency
+# ---------------------------------------------------------------------------
+
+_AGGREGATE_PATTERNS = [
+    r"\ball\b.*\b(?:invoice|order|report|document|item|product|shipping|purchase)",
+    r"\btotal\b.*\b(?:price|cost|amount|value|number|count|quantity|items)\b.*\b(?:of all|from|in|for|during)\b",
+    r"\bhow many\b",
+    r"\blist\b.*\b(?:every|all|each)\b",
+    r"\bevery\b",
+    r"\b(?:invoices?|orders?|reports?|documents?|items?|products?)\b.*\b(?:from|in|of|during|for)\b.*\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december|20\d{2}|q[1-4])\b",
+    r"\btypes of documents\b",
+    r"\bwhat.*(?:do we have|exist|available)\b",
+    r"\b(?:stock|inventory)\b.*\breport",
+    r"\b(?:exist|available)\b.*\b(?:in the vault|in the database)\b",
+]
+
+_AGGREGATE_RE = re.compile("|".join(_AGGREGATE_PATTERNS), re.IGNORECASE)
+
+
+def classify_statement(text: str) -> Literal["point", "aggregate"]:
+    """Classify a statement as point or aggregate. Rule-based, zero latency."""
+    normalized = normalize_numbers(text.lower())
+    if _AGGREGATE_RE.search(normalized):
+        return "aggregate"
+    return "point"
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +90,9 @@ class VerificationState(TypedDict):
     statement_text: str
     statement_id: str
     vault_id: str
+
+    # Classification
+    statement_type: str  # "point" | "aggregate"
 
     # Mutable state (updated by nodes)
     search_query: str
@@ -122,8 +156,18 @@ def _get_verdict_llm() -> ChatOpenAI:
 # Graph nodes
 # ---------------------------------------------------------------------------
 
+async def classify_node(state: VerificationState) -> dict:
+    """Classify the statement type to choose the right retrieval strategy."""
+    stype = classify_statement(state["statement_text"])
+    logger.info(
+        "Verification classify: statement='%s', type=%s",
+        state["statement_text"][:50], stype,
+    )
+    return {"statement_type": stype}
+
+
 async def retrieve_node(state: VerificationState) -> dict:
-    """Retrieve documents from the vault using hybrid search + entity lookup.
+    """Retrieve documents for POINT queries using hybrid search + entity lookup.
 
     On first attempt, builds an enriched search query with entity-ID
     boosting. On subsequent attempts, uses the transformed query from
@@ -181,14 +225,110 @@ async def retrieve_node(state: VerificationState) -> dict:
         results = hybrid_results
 
     logger.info(
-        f"Verification retrieve: statement='{statement[:50]}', "
-        f"attempt={attempts + 1}, results={len(results)}"
+        "Verification retrieve (point): statement='%s', attempt=%d, results=%d",
+        statement[:50], attempts + 1, len(results),
     )
 
     return {
         "search_results": [r.model_dump(mode="json") for r in results],
         "search_query": search_text,
         "search_attempts": attempts + 1,
+    }
+
+
+async def aggregate_retrieve_node(state: VerificationState) -> dict:
+    """Retrieve documents for AGGREGATE queries using exhaustive multi-pass search.
+
+    Uses high top_k and multiple search strategies:
+      1. Hybrid search with full statement (high top_k)
+      2. Targeted keyword search (date filters, entity types)
+      3. Fetch ALL chunks from matched document IDs for completeness
+    """
+    statement = state["statement_text"]
+    vault_id = UUID(state["vault_id"])
+    top_k = SETTINGS.COPILOT.VERIFICATION_AGGREGATE_TOP_K
+
+    all_results: list[SearchResult] = []
+    seen_ids: set = set()
+
+    def _merge(new_results: list[SearchResult]) -> None:
+        for r in new_results:
+            if r.chunk_id not in seen_ids:
+                seen_ids.add(r.chunk_id)
+                all_results.append(r)
+
+    # Pass 1: Hybrid search with full statement
+    search_text = normalize_numbers(statement)
+    embedder = get_embedder()
+    query_embedding = await embedder.embed_query(search_text)
+
+    async with get_db_session() as db:
+        pass1 = await hybrid_search(
+            query_text=search_text,
+            query_embedding=query_embedding,
+            vault_id=vault_id,
+            db=db,
+            top_k=top_k,
+            mmr_lambda=SETTINGS.COPILOT.VERIFICATION_MMR_LAMBDA,
+        )
+    _merge(pass1)
+
+    # Pass 2: Focused keyword search with extracted date/entity keywords
+    date_keywords = _extract_date_keywords(statement)
+    entity_keywords = _extract_entity_type_keywords(statement)
+    focused_query = " ".join(entity_keywords + date_keywords)
+
+    if focused_query.strip() and focused_query.strip() != search_text.strip():
+        focused_embedding = await embedder.embed_query(focused_query)
+        async with get_db_session() as db:
+            pass2 = await hybrid_search(
+                query_text=focused_query,
+                query_embedding=focused_embedding,
+                vault_id=vault_id,
+                db=db,
+                top_k=top_k,
+                mmr_lambda=SETTINGS.COPILOT.VERIFICATION_MMR_LAMBDA,
+            )
+        _merge(pass2)
+
+    # Pass 3: Fetch ALL chunks from discovered document IDs
+    if all_results:
+        doc_ids = list({r.doc_id for r in all_results})[:20]
+        async with get_db_session() as db:
+            chunk_stmt = (
+                select(Chunk)
+                .where(Chunk.doc_id.in_(doc_ids))
+                .where(Chunk.vault_id == vault_id)
+                .where(Chunk.is_deleted == False)  # noqa: E712
+                .order_by(Chunk.doc_id, Chunk.chunk_index)
+            )
+            result = await db.execute(chunk_stmt)
+            chunks = result.scalars().all()
+
+        for chunk in chunks:
+            if chunk.id not in seen_ids:
+                seen_ids.add(chunk.id)
+                all_results.append(SearchResult(
+                    chunk_id=chunk.id,
+                    doc_id=chunk.doc_id,
+                    content=chunk.content,
+                    content_with_header=chunk.content_with_header,
+                    score=0.5,
+                    section_heading=chunk.section_heading,
+                    page_number=chunk.page_number,
+                    original_filename=None,
+                ))
+
+    logger.info(
+        "Verification retrieve (aggregate): statement='%s', results=%d",
+        statement[:50], len(all_results),
+    )
+
+    return {
+        "search_results": [r.model_dump(mode="json") for r in all_results],
+        "search_query": search_text,
+        "search_attempts": 1,
+        "is_relevant": len(all_results) > 0,
     }
 
 
@@ -203,9 +343,9 @@ async def grade_node(state: VerificationState) -> dict:
     if not results:
         return {"is_relevant": False}
 
-    # Build context from results
+    # Build context from results (first 10 chunks for grading)
     context_parts: list[str] = []
-    for i, r in enumerate(results, 1):
+    for i, r in enumerate(results[:10], 1):
         content = r.get("content_with_header", r.get("content", ""))
         score = r.get("score", 0.0)
         context_parts.append(f"--- Document Chunk {i} (relevance: {score:.3f}) ---")
@@ -275,8 +415,8 @@ async def transform_node(state: VerificationState) -> dict:
 async def synthesise_node(state: VerificationState) -> dict:
     """Synthesise a verification verdict from the statement and evidence.
 
-    This is the final node — produces the verdict (supported/contradicted/
-    unverifiable) with confidence, explanation, and evidence quotes.
+    For aggregate queries, passes ALL retrieved chunks (up to 40) so the
+    LLM can enumerate every entity. For point queries, limits to 15.
     """
     results = state.get("search_results", [])
 
@@ -288,9 +428,10 @@ async def synthesise_node(state: VerificationState) -> dict:
             "evidence": [],
         }
 
-    # Build context
+    # For aggregate: include more chunks so the LLM sees everything.
+    max_chunks = 40 if state.get("statement_type") == "aggregate" else 15
     context_parts: list[str] = []
-    for i, r in enumerate(results, 1):
+    for i, r in enumerate(results[:max_chunks], 1):
         content = r.get("content_with_header", r.get("content", ""))
         score = r.get("score", 0.0)
         context_parts.append(f"--- Document Chunk {i} (relevance: {score:.3f}) ---")
@@ -298,8 +439,19 @@ async def synthesise_node(state: VerificationState) -> dict:
         context_parts.append("")
     context = "\n".join(context_parts)
 
+    # For aggregate queries, give the LLM a count hint
+    statement_text = normalize_numbers(state["statement_text"])
+    if state.get("statement_type") == "aggregate":
+        doc_ids = {r.get("doc_id", "") for r in results}
+        statement_text = (
+            f"{statement_text}\n\n"
+            f"NOTE: The search returned {len(results)} document chunks from "
+            f"{len(doc_ids)} unique documents. List ALL matching documents "
+            f"and their details in the explanation."
+        )
+
     user_message = VERIFICATION_USER.format(
-        statement=normalize_numbers(state["statement_text"]),
+        statement=statement_text,
         context=context,
     )
 
@@ -333,8 +485,15 @@ async def synthesise_node(state: VerificationState) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Conditional edge
+# Conditional edges
 # ---------------------------------------------------------------------------
+
+def route_by_type(state: VerificationState) -> str:
+    """Route to the appropriate retrieval strategy based on statement type."""
+    if state.get("statement_type") == "aggregate":
+        return "aggregate_retrieve"
+    return "retrieve"
+
 
 def should_retry(state: VerificationState) -> str:
     """Decide whether to retry retrieval or proceed to verdict synthesis.
@@ -357,24 +516,37 @@ def should_retry(state: VerificationState) -> str:
 # ---------------------------------------------------------------------------
 
 def build_verification_graph() -> StateGraph:
-    """Build the Corrective-RAG verification graph.
+    """Build the Adaptive Corrective-RAG verification graph.
 
     Flow::
 
-        START → retrieve → grade → [should_retry?]
-            → "transform": transform_query → retrieve → grade → ...
-            → "synthesise": synthesise_verdict → END
+        START -> classify -> [route_by_type]
+            -> "retrieve" (point):
+                retrieve -> grade -> [should_retry?]
+                    -> "transform": transform -> retrieve -> grade -> ...
+                    -> "synthesise": synthesise -> END
+            -> "aggregate_retrieve" (aggregate):
+                aggregate_retrieve -> synthesise -> END
     """
     graph = StateGraph(VerificationState)
 
     # Add nodes
+    graph.add_node("classify", classify_node)
     graph.add_node("retrieve", retrieve_node)
+    graph.add_node("aggregate_retrieve", aggregate_retrieve_node)
     graph.add_node("grade", grade_node)
     graph.add_node("transform", transform_node)
     graph.add_node("synthesise", synthesise_node)
 
-    # Wire edges
-    graph.add_edge(START, "retrieve")
+    # Entry: classify first
+    graph.add_edge(START, "classify")
+    graph.add_conditional_edges(
+        "classify",
+        route_by_type,
+        {"retrieve": "retrieve", "aggregate_retrieve": "aggregate_retrieve"},
+    )
+
+    # Point path: retrieve -> grade -> [retry?] -> synthesise
     graph.add_edge("retrieve", "grade")
     graph.add_conditional_edges(
         "grade",
@@ -382,6 +554,11 @@ def build_verification_graph() -> StateGraph:
         {"transform": "transform", "synthesise": "synthesise"},
     )
     graph.add_edge("transform", "retrieve")
+
+    # Aggregate path: aggregate_retrieve -> synthesise (no grading)
+    graph.add_edge("aggregate_retrieve", "synthesise")
+
+    # Terminal
     graph.add_edge("synthesise", END)
 
     return graph
@@ -425,6 +602,7 @@ async def verify_statement(
         "statement_text": statement.text,
         "statement_id": statement.id,
         "vault_id": str(vault_id),
+        "statement_type": "point",  # classify_node will update this
         "search_query": "",
         "search_results": [],
         "search_attempts": 0,
@@ -484,6 +662,76 @@ async def verify_statement(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+_MONTH_MAP = {
+    "january": "01", "jan": "01",
+    "february": "02", "feb": "02",
+    "march": "03", "mar": "03",
+    "april": "04", "apr": "04",
+    "may": "05",
+    "june": "06", "jun": "06",
+    "july": "07", "jul": "07",
+    "august": "08", "aug": "08",
+    "september": "09", "sep": "09",
+    "october": "10", "oct": "10",
+    "november": "11", "nov": "11",
+    "december": "12", "dec": "12",
+}
+
+
+def _extract_date_keywords(text: str) -> list[str]:
+    """Extract date-related keywords for focused aggregate search.
+
+    E.g., "July 2016" -> ["July", "2016", "2016-07"]
+    """
+    keywords: list[str] = []
+    text_lower = text.lower()
+
+    year_match = re.search(r"\b(20\d{2})\b", text)
+    year = year_match.group(1) if year_match else ""
+
+    for month_name, month_num in _MONTH_MAP.items():
+        if month_name in text_lower:
+            keywords.append(month_name.capitalize())
+            if year:
+                keywords.append(f"{year}-{month_num}")
+            break
+
+    if year:
+        keywords.append(year)
+
+    # Quarter support: Q1 2016 -> 2016-01, 2016-02, 2016-03
+    q_match = re.search(r"\bq([1-4])\b", text_lower)
+    if q_match and year:
+        quarter = int(q_match.group(1))
+        start_month = (quarter - 1) * 3 + 1
+        for m in range(start_month, start_month + 3):
+            keywords.append(f"{year}-{m:02d}")
+
+    return keywords
+
+
+def _extract_entity_type_keywords(text: str) -> list[str]:
+    """Extract entity type keywords for focused aggregate search."""
+    keywords: list[str] = []
+    text_lower = text.lower()
+
+    entity_types = {
+        "invoice": ["invoice", "invoices"],
+        "order": ["order", "orders", "purchase order", "purchase orders"],
+        "stock report": ["stock report", "stock reports", "inventory report"],
+        "shipping": ["shipping", "shipping order", "shipment"],
+        "purchase": ["purchase", "purchase order"],
+    }
+
+    for canonical, variants in entity_types.items():
+        for variant in variants:
+            if variant in text_lower:
+                keywords.append(canonical)
+                break
+
+    return keywords
+
 
 def _parse_verdict_response(raw: str) -> dict:
     """Parse the LLM JSON response into state updates."""

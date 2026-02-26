@@ -48,8 +48,9 @@ class CopilotConfig(BaseSettings):
     # Verification — LangGraph self-corrective retrieval graph
     VERIFICATION_MODEL: str = ""  # defaults to OPENAI_QUERY_MODEL if empty
     VERIFICATION_TEMPERATURE: float = 0.0
-    VERIFICATION_TOP_K: int = 5
-    VERIFICATION_MAX_SEARCH_ATTEMPTS: int = 2
+    VERIFICATION_TOP_K: int = 8
+    VERIFICATION_AGGREGATE_TOP_K: int = 30
+    VERIFICATION_MAX_SEARCH_ATTEMPTS: int = 3
     VERIFICATION_MMR_LAMBDA: float = 1.0
 
     # Grading — fast model to grade retrieval relevance before synthesis

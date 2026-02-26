@@ -41,13 +41,13 @@ function CitationCard({ citation, index }: { citation: Citation; index: number }
   const isLong = citation.quote.length > 200;
 
   return (
-    <div className="rounded-lg border border-neutral-200 transition-colors hover:border-neutral-300 dark:border-neutral-700 dark:hover:border-neutral-600">
+    <div className="overflow-hidden rounded-lg border border-neutral-200 transition-colors hover:border-neutral-300 dark:border-neutral-700 dark:hover:border-neutral-600">
       <button
         onClick={() => setExpanded(!expanded)}
         className="flex w-full items-center gap-2 px-3 py-2 text-left"
       >
         <FileText className="h-3.5 w-3.5 shrink-0 text-neutral-400" />
-        <span className="flex-1 truncate text-xs font-medium text-foreground">
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">
           {citation.doc_title}
           {citation.section && (
             <span className="text-neutral-400"> · {citation.section}</span>
@@ -69,11 +69,11 @@ function CitationCard({ citation, index }: { citation: Citation; index: number }
       </button>
       <div
         className={cn(
-          "border-t border-neutral-100 px-3 py-2 dark:border-neutral-800",
-          isLong && !expanded && "max-h-24 overflow-hidden",
+          "overflow-hidden border-t border-neutral-100 px-3 py-2 dark:border-neutral-800",
+          isLong && !expanded && "max-h-24",
         )}
       >
-        <div className="prose prose-xs max-w-none text-xs text-neutral-600 dark:prose-invert dark:text-neutral-400 prose-p:my-1 prose-table:my-1 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-table:text-xs prose-table:border prose-th:border prose-td:border prose-th:bg-neutral-50 dark:prose-th:bg-neutral-800/50">
+        <div className="prose prose-xs max-w-none overflow-x-auto text-xs text-neutral-600 dark:prose-invert dark:text-neutral-400 prose-p:my-1 prose-table:my-1 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-table:text-xs prose-table:border prose-th:border prose-td:border prose-th:bg-neutral-50 dark:prose-th:bg-neutral-800/50">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>
             {citation.quote}
           </ReactMarkdown>
