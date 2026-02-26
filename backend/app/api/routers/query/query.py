@@ -13,6 +13,7 @@ from app.db.models import User
 from app.core.auth.deps import get_current_user, require_vault_member
 from app.core.config import get_settings
 from app.core.copilot import query_vault_agent, stream_vault_agent
+from app.core.rag.generation import Citation
 from app.core.logger import setup_logger
 
 from app.api.routers.query.schemas import QueryRequest, QueryResponse
@@ -126,10 +127,18 @@ async def query_vault(
 
     return QueryResponse(
         answer=answer.answer,
-        citations=[],
+        citations=[
+            Citation(
+                doc_title=e.doc_title,
+                section=e.section,
+                page=e.page,
+                quote=e.quote,
+            )
+            for e in answer.citations
+        ],
         confidence=answer.confidence,
         has_sufficient_evidence=answer.has_sufficient_evidence,
-        chunks_used=0,
+        chunks_used=len(answer.citations),
         retrieval_method="agent",
         latency_ms=int((time.monotonic() - start) * 1000),
     )

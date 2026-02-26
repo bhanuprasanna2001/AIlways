@@ -127,11 +127,21 @@ class TranscriptBuffer:
         return new_claims
 
     def _is_duplicate(self, fingerprint: str) -> bool:
-        fp_words = set(fingerprint.split())
+        """Check if a fingerprint is a semantic duplicate of a seen one.
+
+        Uses Jaccard word-overlap with discriminator boosting: tokens
+        that carry high semantic weight (months, numbers, entity IDs) are
+        repeated in the word bag so changes in those tokens produce a much
+        larger Jaccard divergence.  Without boosting, statements like
+        'all invoices from july 2016' vs 'all invoices from august 2016'
+        share about 80% words; with 3x boosting on the month token,
+        overlap drops to about 50%.
+        """
+        fp_words = _boosted_word_bag(fingerprint)
         if not fp_words:
             return False
         for seen_fp in self._seen_claim_fingerprints:
-            seen_words = set(seen_fp.split())
+            seen_words = _boosted_word_bag(seen_fp)
             if not seen_words:
                 continue
             intersection = len(fp_words & seen_words)
@@ -214,3 +224,75 @@ def claim_fingerprint(text: str) -> str:
     text = text.lower()
     text = re.sub(r"[^\w\s]", "", text)
     return " ".join(text.split())
+
+
+# ---------------------------------------------------------------------------
+# Discriminator boosting for deduplication
+# ---------------------------------------------------------------------------
+
+_MONTH_NAMES = frozenset({
+    "january", "jan", "february", "feb", "march", "mar",
+    "april", "apr", "may", "june", "jun", "july", "jul",
+    "august", "aug", "september", "sep", "october", "oct",
+    "november", "nov", "december", "dec",
+})
+_QUARTER_RE = re.compile(r"^q[1-4]$")
+_NUMBER_RE = re.compile(r"^\d+$")
+
+# Repeat count for boosted tokens.  3× means changing a single
+# discriminator shifts at least 2 bag items, dropping Jaccard well
+# below the 0.8 default threshold.
+_BOOST_FACTOR = 3
+
+
+def _is_discriminator(token: str) -> bool:
+    """Return True if the token carries high semantic weight for dedup.
+
+    Called on *lowercased* fingerprint tokens (``claim_fingerprint``
+    normalises to lowercase), so entity-ID detection uses the original
+    text pattern instead of an upper-case regex.
+    """
+    if token in _MONTH_NAMES:
+        return True
+    if _QUARTER_RE.match(token):
+        return True
+    if _NUMBER_RE.match(token) and len(token) >= 3:
+        return True
+    # Currency amounts stripped of punctuation become pure digits — caught above.
+    # All-alpha tokens ≥3 chars that aren't common English words are likely
+    # entity/customer IDs (vinet, tomsp).  We keep the check broad because
+    # false positives only add a small constant cost.
+    if token.isalpha() and len(token) >= 4 and token not in _COMMON_WORDS:
+        return True
+    return False
+
+
+# Common short words that should NOT be boosted as entity IDs.
+_COMMON_WORDS = frozenset({
+    "the", "and", "for", "from", "with", "that", "this", "have",
+    "been", "were", "they", "their", "which", "about", "would",
+    "there", "each", "every", "some", "what", "when", "where",
+    "more", "most", "also", "just", "only", "than", "then",
+    "into", "over", "such", "after", "before", "between",
+    "total", "price", "count", "number", "order", "invoice",
+    "report", "stock", "purchase", "shipping", "delivery",
+    "document", "documents", "customer", "invoices", "orders",
+    "reports", "items", "products", "list", "give", "show",
+    "many", "much", "all", "how", "does", "are", "was", "not",
+})
+
+
+def _boosted_word_bag(fingerprint: str) -> set[str]:
+    """Build a word bag with discriminator tokens repeated for boost.
+
+    Normal tokens appear once.  Discriminators appear ``_BOOST_FACTOR``
+    times using suffixed copies (e.g. ``july``, ``july__1``, ``july__2``)
+    so the set-based Jaccard calculation gives them more weight.
+    """
+    bag: set[str] = set()
+    for token in fingerprint.split():
+        bag.add(token)
+        if _is_discriminator(token):
+            for i in range(1, _BOOST_FACTOR):
+                bag.add(f"{token}__{i}")
+    return bag

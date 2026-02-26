@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator
 from typing import Annotated, TypedDict
 from uuid import UUID
@@ -50,6 +51,7 @@ from app.core.copilot.tools import COPILOT_TOOLS
 from app.core.copilot.prompts import AGENT_SYSTEM
 from app.core.copilot.base import CopilotAnswer, Evidence
 from app.core.rag.query import rewrite_query, extract_entity_ids
+from app.core.rag.generation import Citation
 from app.core.copilot.classification import classify_query_type
 from app.core.config import get_settings
 from app.core.logger import setup_logger
@@ -336,6 +338,102 @@ def _build_messages(
 
 
 # ---------------------------------------------------------------------------
+# Citation extraction — parse structured references from tool messages
+# ---------------------------------------------------------------------------
+
+# Patterns for extracting document references from tool output text.
+# Each tool uses a different format — parse accordingly.
+_SOURCE_RE = re.compile(r"\[Source:\s*(.+?)\]")
+_FULL_DOC_RE = re.compile(r"=== FULL DOCUMENT:\s*(.+?)\s*===")
+_FILTER_LINE_RE = re.compile(r"^\d+\.\s+(.+?)(?:\s+—\s+|$)", re.MULTILINE)
+_CHUNK_BLOCK_RE = re.compile(
+    r"--- Document Chunk \d+.*?---\n(.*?)(?=--- Document Chunk|\Z)",
+    re.DOTALL,
+)
+
+
+def _extract_citations_from_messages(
+    messages: list[AnyMessage],
+) -> tuple[list[Citation], int]:
+    """Extract structured citations and chunk count from tool messages.
+
+    Scans the conversation history for ``ToolMessage`` objects and parses
+    document references from each tool's output format:
+      - ``search_documents`` / ``lookup_entity``: ``[Source: filename]`` blocks.
+      - ``filter_documents``: numbered list ``N. filename — details``.
+      - ``get_full_document``: ``=== FULL DOCUMENT: filename ===``.
+      - ``compute``: no citations.
+
+    Returns:
+        (citations, chunks_used) — deduplicated list and total count.
+    """
+    seen_titles: set[str] = set()
+    citations: list[Citation] = []
+    chunks_used = 0
+
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+
+        content = msg.content or ""
+        tool_name = getattr(msg, "name", "") or ""
+
+        if tool_name in ("search_documents", "lookup_entity"):
+            # Parse chunk blocks: --- Document Chunk N --- followed by
+            # [Source: filename] ... content ...
+            blocks = _CHUNK_BLOCK_RE.findall(content)
+            for block in blocks:
+                chunks_used += 1
+                source_match = _SOURCE_RE.search(block)
+                if not source_match:
+                    continue
+                title = source_match.group(1).strip()
+                if title in seen_titles:
+                    continue
+                seen_titles.add(title)
+                # First meaningful line after the source tag as quote
+                lines = block[source_match.end():].strip().splitlines()
+                quote = ""
+                for line in lines:
+                    stripped = line.strip()
+                    if stripped:
+                        quote = stripped[:300]
+                        break
+                citations.append(Citation(
+                    doc_title=title, quote=quote,
+                ))
+
+        elif tool_name == "filter_documents":
+            # Parse numbered list: "N. filename — details"
+            for match in _FILTER_LINE_RE.finditer(content):
+                chunks_used += 1
+                title = match.group(1).strip()
+                if title in seen_titles:
+                    continue
+                seen_titles.add(title)
+                # Capture the full line (after filename) as quote
+                full_line = match.group(0).strip()
+                dash_idx = full_line.find(" — ")
+                quote = full_line[dash_idx + 3:].strip() if dash_idx > 0 else ""
+                citations.append(Citation(
+                    doc_title=title, quote=quote[:300],
+                ))
+
+        elif tool_name == "get_full_document":
+            doc_match = _FULL_DOC_RE.search(content)
+            if doc_match:
+                chunks_used += 1
+                title = doc_match.group(1).strip()
+                if title not in seen_titles:
+                    seen_titles.add(title)
+                    citations.append(Citation(
+                        doc_title=title, quote="Full document retrieved.",
+                    ))
+
+    return citations, chunks_used
+
+
+# ---------------------------------------------------------------------------
 # Public API — full invocation
 # ---------------------------------------------------------------------------
 
@@ -402,8 +500,18 @@ async def query_vault_agent(
     if not answer_text:
         return CopilotAnswer(answer="I couldn't find relevant information in the vault.")
 
+    # Extract structured citations from tool messages
+    citations, chunks_used = _extract_citations_from_messages(final_messages)
+
     return CopilotAnswer(
         answer=answer_text,
+        citations=[Evidence(
+            doc_title=c.doc_title,
+            section=c.section,
+            page=c.page,
+            quote=c.quote,
+            relevance_score=1.0,
+        ) for c in citations],
         confidence=0.8,
         has_sufficient_evidence=True,
     )
@@ -451,6 +559,7 @@ async def stream_vault_agent(
 
     tool_call_count = 0
     full_content = ""
+    all_tool_messages: list[ToolMessage] = []
 
     try:
         async for event in graph.astream_events(
@@ -460,10 +569,14 @@ async def stream_vault_agent(
         ):
             kind = event.get("event", "")
 
-            # Tool invocations — emit retrieval event
+            # Tool invocations — emit retrieval event & collect messages
             if kind == "on_tool_end":
                 tool_call_count += 1
                 yield {"type": "retrieval", "chunks_used": tool_call_count}
+                # Collect ToolMessage for citation extraction
+                output = event.get("data", {}).get("output")
+                if isinstance(output, ToolMessage):
+                    all_tool_messages.append(output)
 
             # LLM token deltas — only from the final response (not tool calls)
             elif kind == "on_chat_model_stream":
@@ -474,14 +587,24 @@ async def stream_vault_agent(
                         full_content += chunk.content
                         yield {"type": "token", "content": chunk.content}
 
+        # Extract citations from collected tool messages
+        citations, chunks_extracted = _extract_citations_from_messages(
+            all_tool_messages,
+        )
+        citation_dicts = [
+            {"doc_title": c.doc_title, "section": c.section,
+             "page": c.page, "quote": c.quote}
+            for c in citations
+        ]
+
         # Final structured event
         yield {
             "type": "done",
             "answer": full_content or "I couldn't find relevant information.",
-            "citations": [],
+            "citations": citation_dicts,
             "confidence": 0.8 if full_content else 0.0,
             "has_sufficient_evidence": bool(full_content),
-            "chunks_used": tool_call_count,
+            "chunks_used": chunks_extracted or tool_call_count,
             "retrieval_method": "agent",
         }
 
